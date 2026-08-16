@@ -1,0 +1,22 @@
+# OS junk files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# In case any tooling gets added later
+node_modules/
+npm-debug.log*
+
+# Local scratch / sample diagrams you don't want to publish
+/scratch/
+*.local.bpmn

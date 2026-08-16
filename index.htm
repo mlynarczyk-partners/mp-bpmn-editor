@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BPMN Editor</title>
+  <link rel="stylesheet" href="./assets/vendor/diagram-js.css">
+  <link rel="stylesheet" href="./assets/vendor/bpmn.css">
+  <link rel="stylesheet" href="./assets/css/app.css">
+</head>
+<body>
+
+<div id="toolbar">
+  <span class="title">⬡ BPMN Editor</span>
+  <a class="brand-credit" href="https://mlynarczyk-partners.com" target="_blank" rel="noopener" title="Mlynarczyk & Partners">
+    <span class="brand-credit-by">by</span>
+    <img src="./assets/img/mp-logo.png" alt="Mlynarczyk & Partners">
+  </a>
+  <span class="sep"></span>
+  <button onclick="newDiagram()">New</button>
+  <button onclick="triggerFileOpen()">Open…</button>
+  <input type="file" id="file-input" accept=".bpmn,.xml" style="display:none" onchange="openFile(event)">
+  <span class="sep"></span>
+  <input type="text" id="filename-input" value="diagram" placeholder="file name">
+  <button class="primary" onclick="saveDiagram()">Save .bpmn</button>
+  <button id="autosave-toggle" onclick="toggleAutosave()">Auto-save</button>
+  <button id="extended-details-toggle" onclick="toggleExtendedDetails()">Extended</button>
+  <span class="sep"></span>
+  <button onclick="toggleXmlPanel()">XML</button>
+  <button onclick="fitViewport()">Fit view</button>
+  <button onclick="undo()">Undo</button>
+  <button onclick="redo()">Redo</button>
+  <span class="sep"></span>
+  <button id="grid-toggle" onclick="toggleGrid()" title="Grid: off">#</button>
+  <button id="settings-toggle" onclick="openSettingsDictionary()" title="Settings (dictionaries: Systems, ...)">⚙</button>
+  <span class="sep"></span>
+  <button id="close-file-toggle" onclick="closeFile()" title="Close file (blank canvas)">✕</button>
+  <span id="restore-file-banner">
+    <span id="restore-file-label"></span>
+    <button onclick="confirmRestoreLastFile()">Otwórz</button>
+    <button onclick="dismissRestoreLastFile()">Nie teraz</button>
+  </span>
+  <span id="status"></span>
+</div>
+
+<div id="workspace">
+
+  <!-- Tool palette on the left — bpmn-js normally renders this as a
+       floating overlay on top of the canvas; we relocate its DOM element
+       into this fixed sidebar instead (see initModeler() in app.js). -->
+  <div id="palette-panel"></div>
+
+  <div id="canvas-area">
+    <!-- Breadcrumb navigation path -->
+    <div id="breadcrumb"></div>
+
+    <div id="canvas">
+      <div id="drop-overlay">Drop a .bpmn file here</div>
+      <div class="mp-canvas-brand">
+        <a class="mp-canvas-logo" href="https://mlynarczyk-partners.com" target="_blank" rel="noopener" title="Mlynarczyk & Partners">
+          <img src="./assets/img/mp-logo.png" alt="Mlynarczyk & Partners">
+        </a>
+        <span class="mp-powered-by">powered by</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- XML panel (optional) -->
+  <div id="xml-panel">
+    <div id="xml-panel-header">
+      <span>XML preview / edit</span>
+      <button onclick="toggleXmlPanel()" style="font-size:11px;padding:2px 8px;background:#444;border-color:#666;color:#ccc;">✕</button>
+    </div>
+    <textarea id="xml-textarea" spellcheck="false" placeholder="XML will appear here..."></textarea>
+    <div id="xml-panel-footer">
+      <button onclick="importFromXmlPanel()">Import changes</button>
+      <button onclick="copyXml()">Copy XML</button>
+    </div>
+  </div>
+
+  <!-- Structure panel on the right -->
+  <div id="structure-panel">
+    <div id="panel-resize-handle"></div>
+    <div id="structure-header">Process structure</div>
+    <div id="structure-tree"></div>
+    <div id="props-panel" style="display: none;"></div>
+    <div id="panel-resize-grip" title="Drag to resize panel">
+      <span>◀</span>
+      <div class="grip-dots">
+        <div class="grip-dot"></div><div class="grip-dot"></div><div class="grip-dot"></div>
+        <div class="grip-dot"></div><div class="grip-dot"></div><div class="grip-dot"></div>
+      </div>
+      <span>▶</span>
+    </div>
+  </div>
+
+</div>
+
+<script src="./assets/vendor/bpmn-modeler.production.min.js"></script>
+<script src="./assets/js/app.js"></script>
+</body>
+</html>
