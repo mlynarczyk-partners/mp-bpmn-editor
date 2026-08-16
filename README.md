@@ -2,7 +2,7 @@
 
 A lightweight BPMN 2.0 diagram editor built on top of [bpmn-js](https://bpmn.io/). It runs entirely in the browser as a static HTML/JS app — no backend, no build step, nothing to install. Diagrams are opened and saved directly to your local disk via the browser's File System Access API.
 
-Made by [Mlynarczyk & Partners](https://mlynarczyk-partners.com).
+Made by [Mlynarczyk & Partners](https://mlynarczyk-partners.com/en/home/).
 
 ## Features
 
@@ -68,4 +68,4 @@ MIT — see [LICENSE](LICENSE).
 
 ## Credits
 
-Made by [Mlynarczyk & Partners](https://mlynarczyk-partners.com).
+Made by [Mlynarczyk & Partners](https://mlynarczyk-partners.com/en/home/).
