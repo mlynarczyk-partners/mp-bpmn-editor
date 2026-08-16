@@ -118,27 +118,50 @@
     #status.ok  { color: #2a7a2a; }
     #status.err { color: #c0392b; }
 
-    /* główny obszar roboczy */
+    /* main working area */
     #workspace {
       display: flex;
       flex: 1;
       overflow: hidden;
     }
 
-    /* Panel narzędzi (paleta) po lewej — domyślnie bpmn-js renderuje ją jako
-       swobodnie pływający element nad płótnem (position: absolute); tutaj
-       zamieniamy ją w stały panel boczny, tego samego rodzaju co panel
-       struktury po prawej. Sam element .djs-palette jest przenoszony do
-       tego kontenera w initModeler() (app.js) — poniższe reguły tylko
-       kasują jego domyślne pozycjonowanie/wygląd "pływającej karty".  */
+    /* Tool palette on the left — by default bpmn-js renders it as a
+       freely floating element over the canvas (position: absolute); here
+       we turn it into a fixed side panel, the same kind as the structure
+       panel on the right. The .djs-palette element itself is moved into
+       this container in initModeler() (app.js) — the rules below just
+       strip its default "floating card" positioning/look.  */
     #palette-panel {
       width: 56px;
       background: #fafaf8;
       border-right: 1px solid #e0e0dc;
       flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    /* Scrolls on its own so the Help button below always stays pinned to
+       the bottom of the sidebar, even if the tool palette ever grows
+       taller than the available space. */
+    #palette-scroll {
+      flex: 1;
       overflow-y: auto;
       overflow-x: hidden;
     }
+    #help-toggle {
+      flex-shrink: 0;
+      width: 40px;
+      height: 34px;
+      margin: 6px auto;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      font-weight: 600;
+      color: #888;
+      background: #fff;
+    }
+    #help-toggle:hover { background: #eaf3fc; border-color: #a9cdee; color: #1a6bb5; }
     #palette-panel .djs-palette {
       position: static;
       left: auto;
@@ -148,9 +171,9 @@
       border-radius: 0;
       background: transparent;
     }
-    /* Paleta w trybie "two-column" (gdyby się kiedyś uaktywnił) ma z
-       vendorowego CSS szerokość 94px — w naszym stałym panelu ma się
-       zmieścić w całości, nie wystawać poza jego szerokość. */
+    /* The palette in "two-column" mode (should it ever get activated) has a
+       94px width from the vendor CSS — in our fixed panel it needs to
+       fit entirely within it, not stick out past its width. */
     #palette-panel .djs-palette.two-column.open {
       width: 100%;
     }
@@ -160,7 +183,90 @@
       margin: 0 auto;
     }
 
-    /* panel struktury po prawej */
+    /* Dims the rest of the app while the first-time coachmark is showing,
+       so the callout and the highlighted "?" button (see below) stand
+       out clearly. Sits above everything except the coachmark itself and
+       the highlighted button. Clicking it dismisses the coachmark, same
+       as the ✕ button. */
+    #help-onboarding-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.3);
+      z-index: 800;
+      cursor: pointer;
+    }
+
+    /* First-time coachmark that points at the Help ("?") button, shown
+       once until dismissed (see initHelpOnboarding() in app.js). Uses
+       position:fixed so it floats above the canvas regardless of where
+       it sits in the DOM. */
+    #help-onboarding {
+      position: fixed;
+      left: 72px;
+      bottom: 6px;
+      z-index: 900;
+      width: 232px;
+      background: #14508c;
+      color: #fff;
+      padding: 16px 18px 18px;
+      border-radius: 10px;
+      box-shadow: 0 10px 32px rgba(0,0,0,0.4);
+      text-align: center;
+    }
+    #help-onboarding-text {
+      font-size: 17px;
+      font-weight: 700;
+      line-height: 1.35;
+      margin-bottom: 12px;
+    }
+    #help-onboarding-btn {
+      display: block;
+      width: 100%;
+      padding: 9px 0;
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      color: #14508c;
+      background: #fff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    #help-onboarding-btn:hover { background: #eaf3fc; }
+    #help-onboarding-close {
+      position: absolute;
+      top: 4px;
+      right: 7px;
+      border: none;
+      background: none;
+      color: rgba(255,255,255,0.7);
+      font-size: 13px;
+      padding: 3px 5px;
+      cursor: pointer;
+    }
+    #help-onboarding-close:hover { color: #fff; }
+    /* Small triangle arrow on the bubble's left edge, pointing back at the
+       "?" button pinned at the bottom of the palette panel. */
+    #help-onboarding-arrow {
+      position: absolute;
+      left: -13px;
+      bottom: 18px;
+      width: 0;
+      height: 0;
+      border-style: solid;
+      border-width: 9px 13px 9px 0;
+      border-color: transparent #14508c transparent transparent;
+    }
+    /* Lifts the "?" button above the dimming overlay and gives it a glow
+       so it reads as the thing the coachmark is pointing at, instead of
+       being dimmed along with the rest of the app. */
+    #help-toggle.onboarding-highlight {
+      position: relative;
+      z-index: 850;
+      box-shadow: 0 0 0 4px rgba(255,255,255,0.55), 0 0 14px rgba(0,0,0,0.35);
+    }
+
+    /* structure panel on the right */
     #structure-panel {
       width: 240px;
       background: #fafaf8;
@@ -256,7 +362,7 @@
     .tree-callactivity:hover { opacity: 1; }
     .tree-call-target { font-size: 11px; color: #1a6bb5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-    /* Pola tekstowe w panelu właściwości */
+    /* Text fields in the properties panel */
     .prop-textarea {
       width: 100%; font-size: 12px; font-family: inherit;
       border: 1px solid #d0d0cc; border-radius: 5px;
@@ -277,7 +383,7 @@
       color: #1a6bb5; text-decoration: none; word-break: break-all;
     }
     .prop-link:hover { text-decoration: underline; }
-    /* prop-save-btn usunięty — auto-save przez onblur */
+    /* prop-save-btn removed — auto-save via onblur */
 
     /* Color picker */
     .color-section { margin-top: 10px; }
@@ -335,7 +441,7 @@
     }
     .color-apply-btn:hover { background: #1558a0; }
 
-    /* Panel właściwości elementu */
+    /* Element properties panel */
     #props-panel {
       border-top: 1px solid #e8e8e4;
       padding: 10px 12px;
@@ -376,7 +482,7 @@
       overflow: hidden;
     }
 
-    /* breadcrumb — pojawia się gdy jesteś w subprocesie */
+    /* breadcrumb — appears when you're inside a subprocess */
     #breadcrumb {
       display: none;
       align-items: center;
@@ -429,14 +535,15 @@
       right: 76px; /* 15 (bpmn.io right margin) + 53 (bpmn.io logo width) + 8 (gap) */
       z-index: 100;
       display: flex;
-      align-items: center;
+      align-items: flex-start; /* top-align so the M's cap-height lines up with the B's cap-height */
       gap: 6px;
-      height: 21px; /* match the bpmn.io logo's height */
+      height: 21px; /* match the bpmn.io badge's box height */
       opacity: 0.85;
     }
     #canvas .mp-canvas-brand:hover { opacity: 1; }
-    #canvas .mp-canvas-logo { display: flex; align-items: center; }
-    #canvas .mp-canvas-logo img { height: 21px; width: auto; display: block; }
+    #canvas .mp-canvas-logo { display: flex; align-items: flex-start; }
+    #canvas .mp-canvas-logo img { height: 18.9px; width: auto; display: block; }
+    #canvas .mp-powered-by { align-self: center; }
     #canvas .mp-powered-by { font-size: 11px; color: #999; white-space: nowrap; }
 
     /* XML panel */
@@ -470,7 +577,7 @@
     }
     #drop-overlay.visible { display: flex; }
 
-    /* Rozszerzone szczegóły — przycisk-link nad elementem, otwiera "Szczegóły (URL)" */
+    /* Extended details — link-button above the element, opens "Details (URL)" */
     .detail-link-overlay {
       display: flex;
       align-items: center;
@@ -527,4 +634,25 @@
       text-align: center;
       box-shadow: 0 1px 3px rgba(0,0,0,0.25);
       pointer-events: none;
+    }
+
+    /* Help dialog body (see openHelp() in app.js) */
+    .help-content { font-size: 13px; line-height: 1.6; color: #333; }
+    .help-content h3 {
+      font-size: 13px;
+      font-weight: 600;
+      color: #14508c;
+      margin: 20px 0 6px;
+    }
+    .help-content h3:first-child { margin-top: 8px; }
+    .help-content p { margin: 0 0 10px; }
+    .help-content ul { margin: 0 0 10px; padding-left: 20px; }
+    .help-content li { margin: 0 0 4px; }
+    .help-content b { font-weight: 600; }
+    .help-content code {
+      font-family: 'Consolas', 'Monaco', monospace;
+      font-size: 12px;
+      background: #f0f0ec;
+      padding: 1px 5px;
+      border-radius: 3px;
     }

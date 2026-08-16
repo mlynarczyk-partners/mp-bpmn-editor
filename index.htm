@@ -37,8 +37,8 @@
   <button id="close-file-toggle" onclick="closeFile()" title="Close file (blank canvas)">✕</button>
   <span id="restore-file-banner">
     <span id="restore-file-label"></span>
-    <button onclick="confirmRestoreLastFile()">Otwórz</button>
-    <button onclick="dismissRestoreLastFile()">Nie teraz</button>
+    <button onclick="confirmRestoreLastFile()">Open</button>
+    <button onclick="dismissRestoreLastFile()">Not now</button>
   </span>
   <span id="status"></span>
 </div>
@@ -47,8 +47,27 @@
 
   <!-- Tool palette on the left — bpmn-js normally renders this as a
        floating overlay on top of the canvas; we relocate its DOM element
-       into this fixed sidebar instead (see initModeler() in app.js). -->
-  <div id="palette-panel"></div>
+       into the #palette-scroll wrapper below instead (see initModeler() in
+       app.js). The wrapper scrolls on its own so the Help button underneath
+       stays pinned to the bottom of the sidebar regardless of how many
+       tools are in the palette. -->
+  <div id="palette-panel">
+    <div id="palette-scroll"></div>
+    <button id="help-toggle" onclick="openHelp()" title="User guide / Instrukcja obsługi / Инструкция по использованию">?</button>
+  </div>
+
+  <!-- First-time coachmark pointing at the Help ("?") button above. Shown
+       once on first launch (see initHelpOnboarding() near the end of
+       app.js), dismissed for good once closed or opened. The overlay
+       dims the rest of the app so the callout and the highlighted "?"
+       button stand out. -->
+  <div id="help-onboarding-overlay" style="display:none;"></div>
+  <div id="help-onboarding" style="display:none;">
+    <button id="help-onboarding-close" title="Dismiss">✕</button>
+    <div id="help-onboarding-text">How does it work?</div>
+    <button id="help-onboarding-btn">HOW TO</button>
+    <div id="help-onboarding-arrow"></div>
+  </div>
 
   <div id="canvas-area">
     <!-- Breadcrumb navigation path -->
@@ -97,6 +116,7 @@
 </div>
 
 <script src="./assets/vendor/bpmn-modeler.production.min.js"></script>
+<script src="./assets/js/help-content.js"></script>
 <script src="./assets/js/app.js"></script>
 </body>
 </html>

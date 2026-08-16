@@ -13,27 +13,27 @@ const EMPTY_DIAGRAM = `<?xml version="1.0" encoding="UTF-8"?>
 let modeler;
 let xmlPanelVisible = false;
 
-// Stos nawigacji: [{rootEl, label, viewport}]
+// Navigation stack: [{rootEl, label, viewport}]
 let navStack = [];
-// Nazwa bieżącego pliku (bez rozszerzenia)
+// Name of the current file (without extension)
 let currentFilename = '';
 
 /* ─── AUTO-ZAPIS ─── */
-// Uchwyt (FileSystemFileHandle) do pliku na dysku, jeśli plik był otwarty/zapisany
-// przez systemowe okno (File System Access API). Bez niego nie da się zapisać
-// „po cichu" — przeglądarka zawsze musi zapytać o lokalizację.
+// Handle (FileSystemFileHandle) to the file on disk, if the file was opened/saved
+// through the native picker (File System Access API). Without it we can't save
+// "silently" — the browser always has to ask for a location.
 let currentFileHandle = null;
 let hasUnsavedChanges = false;
 let autosaveEnabled = true;
 let autosaveTimer = null;
-const AUTOSAVE_DELAY_MS = 2000; // zapisz 2s po ostatniej zmianie (debounce)
+const AUTOSAVE_DELAY_MS = 2000; // save 2s after the last change (debounce)
 
-/* ─── PAMIĘTANIE OSTATNIO OTWARTEGO PLIKU (auto-wczytanie po F5) ───
-   FileSystemFileHandle nie da się zserializować do JSON/localStorage, ale
-   IndexedDB potrafi go zapamiętać (structured clone). Po odświeżeniu strony
-   próbujemy po cichu odzyskać dostęp (queryPermission) i wczytać ten sam
-   plik; jeśli przeglądarka wymaga jawnego potwierdzenia (wymaga gestu
-   użytkownika), pokazujemy małe pytanie zamiast zgadywać. */
+/* ─── REMEMBERING THE LAST OPENED FILE (auto-load after F5) ───
+   A FileSystemFileHandle can't be serialized to JSON/localStorage, but
+   IndexedDB can remember it (structured clone). After a page reload we
+   silently try to regain access (queryPermission) and reload the same
+   file; if the browser requires explicit confirmation (needs a user
+   gesture), we show a small prompt instead of guessing. */
 const LAST_FILE_HANDLE_DB = 'bpmnEditorDB';
 const LAST_FILE_HANDLE_STORE = 'handles';
 const LAST_FILE_HANDLE_KEY = 'lastFileHandle';
@@ -90,7 +90,7 @@ async function getLastFileHandle() {
   }
 }
 
-// Uchwyt czekający na jawne potwierdzenie użytkownika (patrz showRestoreFileBanner).
+// Handle waiting for explicit user confirmation (see showRestoreFileBanner).
 let pendingRestoreHandle = null;
 
 async function restoreLastFileOrNew() {
@@ -108,13 +108,13 @@ async function restoreLastFileOrNew() {
       updateAutosaveIndicator();
       return;
     }
-    // Przeglądarka wymaga jawnego gestu użytkownika, żeby ponownie przyznać
-    // dostęp — nie blokujemy startu, tylko pokazujemy jednorazowe pytanie.
+    // The browser requires an explicit user gesture to re-grant
+    // access — we don't block startup, just show a one-time prompt.
     pendingRestoreHandle = handle;
     showRestoreFileBanner(handle.name);
     await newDiagram();
   } catch (e) {
-    // Uchwyt nieaktualny (plik przeniesiony/usunięty itp.) — zapomnij go.
+    // Handle is stale (file moved/deleted, etc.) — forget it.
     await forgetLastFileHandle();
     await newDiagram();
   }
@@ -124,7 +124,7 @@ function showRestoreFileBanner(name) {
   const banner = document.getElementById('restore-file-banner');
   const label = document.getElementById('restore-file-label');
   if (!banner || !label) return;
-  label.textContent = 'Przywrócić ostatni plik „' + name + '"?';
+  label.textContent = 'Restore last file "' + name + '"?';
   banner.style.display = 'inline-flex';
 }
 
@@ -140,7 +140,7 @@ async function confirmRestoreLastFile() {
   try {
     const perm = await handle.requestPermission({ mode: 'readwrite' });
     if (perm !== 'granted') {
-      setStatus('Brak dostępu do pliku', 'err');
+      setStatus('No access to the file', 'err');
       dismissRestoreLastFile();
       return;
     }
@@ -151,7 +151,7 @@ async function confirmRestoreLastFile() {
     updateAutosaveIndicator();
     dismissRestoreLastFile();
   } catch (e) {
-    setStatus('Nie udało się przywrócić pliku: ' + e.message, 'err');
+    setStatus('Could not restore the file: ' + e.message, 'err');
     dismissRestoreLastFile();
   }
 }
@@ -226,7 +226,7 @@ function navigateUp() {
 }
 
 function getProcessDisplayName() {
-  // Użyj nazwy pliku jeśli dostępna, inaczej fallback do ID
+  // Use the filename if available, otherwise fall back to the ID
   return currentFilename || 'Main process';
 }
 
@@ -253,7 +253,7 @@ function updateBreadcrumb() {
   bc.classList.add('visible');
   let html = '';
 
-  // Przycisk "wróć do nadrzędnego"
+  // "Back to parent" button
   if (navStack.length > 0) {
     const parentEntry = navStack[navStack.length - 1];
     const parentLabel = (parentEntry.rootEl && parentEntry.rootEl.businessObject && parentEntry.rootEl.businessObject.$type === 'bpmn:Process')
@@ -262,9 +262,9 @@ function updateBreadcrumb() {
     html += `<button class="bc-back-btn" onclick="navigateUp()">↑ Back to: ${escHtml(parentLabel)}</button>`;
   }
 
-  // Ścieżka klikalna: każdy poprzedni poziom
+  // Clickable path: every previous level
   navStack.forEach((item, i) => {
-    // Dla procesu głównego (root) zawsze pokaż aktualną nazwę pliku
+    // For the main (root) process, always show the current filename
     const label = (item.rootEl && item.rootEl.businessObject && item.rootEl.businessObject.$type === 'bpmn:Process')
       ? getProcessDisplayName()
       : item.label;
@@ -272,7 +272,7 @@ function updateBreadcrumb() {
     html += `<span class="bc-sep">›</span>`;
   });
 
-  // Bieżący poziom (niekliwalny)
+  // Current level (not clickable)
   html += `<span class="bc-item current">${escHtml(getBreadcrumbLabel(currentRoot))}</span>`;
 
   bc.innerHTML = html;
@@ -296,12 +296,12 @@ function buildSubprocessTree(boElement, depth) {
 }
 
 function findRootElementForBo(bo) {
-  // Szukamy w elementRegistry elementu którego businessObject to bo
-  // i który jest root (plane) — bpmn-js tworzy plane dla każdego expanded subprocess
+  // Look in elementRegistry for the element whose businessObject is bo
+  // and which is a root (plane) — bpmn-js creates a plane for every expanded subprocess
   const er = modeler.get('elementRegistry');
   const all = er.getAll();
-  // Plane elementów mają type === businessObject.$type + 'Plane' albo są w _planes
-  // Prostsze: szukamy root w _planes canvas
+  // Plane elements have type === businessObject.$type + 'Plane', or are in _planes
+  // Simpler: look for the root in the canvas's _planes
   const canvasAny = modeler.get('canvas');
   const planes = canvasAny._planes || [];
   const found = planes.find(p =>
@@ -321,11 +321,11 @@ function findProcessRoot() {
   return found ? found.rootElement : null;
 }
 
-// Konwersja z bpmn:collaboration do samego bpmn:process jest bezpieczna
-// (nie usuwa niczego z diagramu) TYLKO gdy jest dokładnie jeden pool bez
-// żadnych message flow — w każdym innym przypadku (2+ pule, message flowy)
-// operacja musiałaby coś skasować, więc świadomie w ogóle nie oferujemy tej
-// opcji, zamiast ostrzegać i ryzykować, że ktoś kliknie bez zrozumienia.
+// Converting from bpmn:collaboration to a plain bpmn:process is safe
+// (it discards nothing from the diagram) ONLY when there's exactly one pool with
+// no message flows — in every other case (2+ pools, message flows) the
+// operation would have to delete something, so we deliberately don't offer this
+// option at all, rather than warn and risk someone clicking without understanding.
 function getMpBpmnConversionInfo() {
   if (!modeler) return { canConvert: false };
   try {
@@ -349,7 +349,7 @@ function updateTree() {
   const currentRoot = getCurrentRoot();
 
   try {
-    // Znajdź proces główny
+    // Find the main process
     const processRoot = findProcessRoot();
     if (!processRoot) {
       const canConvert = getMpBpmnConversionInfo().canConvert;
@@ -370,7 +370,7 @@ function updateTree() {
 
     let html = '';
 
-    // Proces główny — pokaż nazwę pliku
+    // Main process — show the filename
     const isProcessActive = currentBo && currentBo.$type === 'bpmn:Process';
     const processDisplayName = getProcessDisplayName();
     html += `<div class="tree-item ${isProcessActive ? 'active' : ''}" onclick="treeNavigateTo(null)" title="${escHtml(processDisplayName)}">
@@ -378,7 +378,7 @@ function updateTree() {
       <span class="tree-label">${escHtml(processDisplayName)}</span>
     </div>`;
 
-    // Subprocesy i Call Activities
+    // Subprocesses and Call Activities
     subprocesses.forEach(item => {
       const isActive = currentBo && currentBo === item.bo;
       const indent = item.depth * 16;
@@ -426,7 +426,7 @@ function treeNavigateTo(subprocessId) {
   if (!subprocessId) {
     const processRoot = findProcessRoot();
     if (processRoot && processRoot !== currentRoot) {
-      // Jeśli root jest na stosie, przywróć jego viewport
+      // If the root is on the stack, restore its viewport
       const rootOnStack = navStack.find(x => x.rootEl === processRoot);
       navStack = [];
       modeler.get('canvas').setRootElement(processRoot);
@@ -441,7 +441,7 @@ function treeNavigateTo(subprocessId) {
     return;
   }
 
-  // Znajdź plane dla danego subprocesu
+  // Find the plane for the given subprocess
   const targetPlane = planes.find(p =>
     p.rootElement && p.rootElement.businessObject &&
     p.rootElement.businessObject.id === subprocessId
@@ -458,17 +458,17 @@ function treeNavigateTo(subprocessId) {
   const targetBo = targetRoot.businessObject;
   const path = findPathToSubprocess(targetBo);
 
-  // Zapisz aktualny viewport dla bieżącego poziomu
+  // Save the current viewport for the current level
   const currentVp = modeler.get('canvas').viewbox();
 
-  // Buduj nowy stos: dla każdego przodka targetRoot weź viewport ze starego stosu jeśli jest,
-  // a dla bieżącego poziomu zapisz aktualny viewport
+  // Build a new stack: for every ancestor of targetRoot, take the viewport from the old stack if present,
+  // and for the current level save the current viewport
   const newStack = path.map(bo => {
     const plane = planes.find(p => p.rootElement && p.rootElement.businessObject === bo);
     const rootEl = plane ? plane.rootElement : null;
-    // Szukaj zapisanego viewportu na starym stosie
+    // Look for a saved viewport on the old stack
     const existingEntry = navStack.find(x => x.rootEl === rootEl);
-    // Jeśli to bieżący poziom — użyj świeżego viewport
+    // If this is the current level — use the fresh viewport
     const isCurrent = rootEl === currentRoot;
     return {
       rootEl,
@@ -485,7 +485,7 @@ function treeNavigateTo(subprocessId) {
 }
 
 function treeNavigateToCallActivity(callActivityId) {
-  // Znajdź docelowy subprocess przez calledElement
+  // Find the target subprocess via calledElement
   const er = modeler.get('elementRegistry');
   const callEl = er.get(callActivityId);
   if (!callEl) { setStatus('Call Activity not found', 'err'); return; }
@@ -495,7 +495,7 @@ function treeNavigateToCallActivity(callActivityId) {
 }
 
 function openCallActivitySelector(elementId) {
-  // Otwórz dialog wyboru subprocesu dla danego elementu
+  // Open the subprocess-selection dialog for the given element
   const planes = modeler.get('canvas')._planes || [];
   const subList = planes
     .filter(p => p.rootElement && p.rootElement.businessObject &&
@@ -507,7 +507,7 @@ function openCallActivitySelector(elementId) {
     return;
   }
 
-  // Usuń stary dialog jeśli istnieje
+  // Remove the old dialog if it exists
   const old = document.getElementById('call-activity-dialog');
   if (old) old.remove();
 
@@ -558,7 +558,7 @@ function applyCallActivityTarget(elementId) {
 }
 
 function findPathToSubprocess(targetBo) {
-  // Zwraca tablicę businessObjectów od procesu głównego do rodzica targetBo (bez targetBo)
+  // Returns an array of businessObjects from the main process down to targetBo's parent (excluding targetBo)
   const processRoot = findProcessRoot();
   if (!processRoot) return [];
   const processBo = processRoot.businessObject;
@@ -606,7 +606,7 @@ function initModeler() {
   // exactly once per modeler instance, and re-importing diagrams later
   // reuses the same modeler/palette rather than recreating it.
   const paletteEl = document.querySelector('#canvas .djs-palette');
-  const palettePanel = document.getElementById('palette-panel');
+  const palettePanel = document.getElementById('palette-scroll');
   if (paletteEl && palettePanel) {
     palettePanel.appendChild(paletteEl);
   }
@@ -801,7 +801,7 @@ function initModeler() {
     scheduleAutosave();
   });
 
-  // Obsługa drill-down przez klik w strzałkę bpmn-js
+  // Handle drill-down via a click on bpmn-js's arrow
   modeler.on('root.set', () => {
     updateBreadcrumb();
     updateTree();
@@ -809,7 +809,7 @@ function initModeler() {
     renderGridBackground();
   });
 
-  // Panel właściwości przy zaznaczeniu elementu
+  // Properties panel on element selection
   modeler.on('selection.changed', ({ newSelection }) => {
     updatePropsPanel(newSelection);
   });
@@ -852,9 +852,9 @@ async function saveDiagram() {
   try {
     const { xml } = await modeler.saveXML({ format: true });
 
-    // Jeśli mamy już uchwyt do pliku, ale użytkownik zmienił nazwę w polu
-    // obok — potraktuj to jak "Zapisz jako": zapytaj o nową lokalizację
-    // zamiast po cichu nadpisywać poprzedni plik pod starą nazwą.
+    // If we already have a file handle, but the user changed the name in the
+    // field next to it — treat this like "Save as": ask for a new location
+    // instead of silently overwriting the previous file under the old name.
     if (currentFileHandle) {
       const typedName = (document.getElementById('filename-input').value || '').trim();
       const handleBase = currentFileHandle.name.replace(/\.bpmn$|\.xml$/i, '');
@@ -863,8 +863,8 @@ async function saveDiagram() {
       }
     }
 
-    // Szybki zapis: mamy już uchwyt do pliku (z wcześniejszego Zapisz/Otwórz)
-    // — zapisz bez pytania o lokalizację.
+    // Quick save: we already have a file handle (from an earlier Save/Open)
+    // — save without asking for a location.
     if (currentFileHandle) {
       try {
         const writable = await currentFileHandle.createWritable();
@@ -875,8 +875,8 @@ async function saveDiagram() {
         updateAutosaveIndicator();
         return;
       } catch (e) {
-        // Uchwyt mógł stracić ważność (np. plik przeniesiony/usunięty) —
-        // poproś o nową lokalizację tak jak przy pierwszym zapisie.
+        // The handle may have become invalid (e.g. file moved/deleted) —
+        // ask for a new location, same as on the first save.
         currentFileHandle = null;
       }
     }
@@ -885,7 +885,7 @@ async function saveDiagram() {
     const filename = name.endsWith('.bpmn') ? name : name + '.bpmn';
 
     if (window.showSaveFilePicker) {
-      // File System Access API — systemowe okno "Zapisz jako"
+      // File System Access API — native "Save as" picker
       const handle = await window.showSaveFilePicker({
         suggestedName: filename,
         types: [{ description: 'BPMN diagram', accept: { 'application/xml': ['.bpmn', '.xml'] } }]
@@ -895,7 +895,7 @@ async function saveDiagram() {
       await writable.close();
       currentFileHandle = handle;
       await rememberLastFileHandle(handle);
-      // Zaktualizuj nazwę pliku w polu
+      // Update the filename in the field
       const savedBase = handle.name.replace(/\.bpmn$|\.xml$/i, '');
       document.getElementById('filename-input').value = savedBase;
       currentFilename = savedBase;
@@ -905,7 +905,7 @@ async function saveDiagram() {
       updateBreadcrumb();
       updateAutosaveIndicator();
     } else {
-      // Fallback dla przeglądarek bez File System Access API
+      // Fallback for browsers without the File System Access API
       const blob = new Blob([xml], { type: 'application/xml' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
@@ -973,8 +973,8 @@ function updateAutosaveIndicator() {
     : 'Auto-save turns on automatically after the first “Save .bpmn” or “Open…”';
 }
 
-// Ostrzeżenie systemowe przy próbie zamknięcia/odświeżenia strony z niezapisanymi zmianami —
-// zabezpieczenie na wypadek gdy auto-zapis nie zdążył jeszcze zadziałać (albo jest niedostępny).
+// Native browser warning when trying to close/refresh the page with unsaved changes —
+// a safety net in case auto-save hasn't had a chance to run yet (or is unavailable).
 window.addEventListener('beforeunload', (e) => {
   if (hasUnsavedChanges) {
     e.preventDefault();
@@ -983,8 +983,8 @@ window.addEventListener('beforeunload', (e) => {
 });
 
 async function triggerFileOpen() {
-  // Najpierw spróbuj systemowego okna (File System Access API) — dzięki temu
-  // dostajemy uchwyt do pliku i możemy potem zapisywać/auto-zapisywać bez pytania.
+  // First try the native picker (File System Access API) — this gives us
+  // a file handle so we can later save/auto-save without asking.
   if (window.showOpenFilePicker) {
     try {
       const [handle] = await window.showOpenFilePicker({
@@ -998,8 +998,8 @@ async function triggerFileOpen() {
       updateAutosaveIndicator();
       return;
     } catch (e) {
-      if (e.name === 'AbortError') return; // użytkownik anulował wybór pliku
-      // w razie nieoczekiwanego błędu — spróbuj starej metody poniżej
+      if (e.name === 'AbortError') return; // user cancelled the file picker
+      // on an unexpected error — fall back to the old method below
     }
   }
   document.getElementById('file-input').click();
@@ -1008,10 +1008,10 @@ async function triggerFileOpen() {
 function openFile(event) {
   const file = event.target.files[0];
   if (!file) return;
-  currentFileHandle = null; // ten sposób wczytywania nie daje uchwytu do zapisu
-  // Bez uchwytu nie da się automatycznie przywrócić TEGO pliku po F5 — a
-  // ponowne otwarcie poprzednio zapamiętanego (innego) pliku byłoby mylące,
-  // skoro użytkownik właśnie otworzył coś innego. Zapomnij go.
+  currentFileHandle = null; // this loading method doesn't give us a save handle
+  // Without a handle, THIS file can't be automatically restored after an F5 — and
+  // re-opening the previously remembered (different) file would be confusing,
+  // since the user just opened something else. Forget it.
   forgetLastFileHandle();
   const reader = new FileReader();
   reader.onload = async e => { await importXml(e.target.result, file.name); updateAutosaveIndicator(); };
@@ -1022,7 +1022,7 @@ function openFile(event) {
 async function importXml(xml, filename) {
   navStack = [];
   try {
-    // Dodaj namespace camunda jeśli go nie ma — potrzebny dla extensionElements
+    // Add the camunda namespace if it's missing — needed for extensionElements
     if (!xml.includes('xmlns:camunda')) {
       xml = xml.replace('<bpmn:definitions ', '<bpmn:definitions xmlns:camunda="http://camunda.org/schema/1.0/bpmn" ');
       xml = xml.replace('<definitions ', '<definitions xmlns:camunda="http://camunda.org/schema/1.0/bpmn" ');
@@ -1050,7 +1050,7 @@ async function importXml(xml, filename) {
       saveDictionaries();
     }
     flushDictionariesToModel();
-    // Odśwież breadcrumb po ustawieniu currentFilename
+    // Refresh the breadcrumb after setting currentFilename
     updateBreadcrumb();
     updateTree();
     refreshDetailOverlays();
@@ -1060,23 +1060,23 @@ async function importXml(xml, filename) {
   }
 }
 
-/* Pliki BPMN z innych narzędzi często owijają proces w bpmn:collaboration
-   (jeden bpmn:participant/"pool"), nawet gdy w praktyce jest tylko jeden
-   proces — a nasze drzewko struktury (Process structure) rozumie tylko
-   zwykły bpmn:process jako korzeń, stąd "No diagram". Ta funkcja "spłaszcza"
-   diagram: usuwa collaboration/participant, przełącza korzeń diagramu
-   (BPMNPlane) na sam proces i zachowuje WSZYSTKIE elementy przepływu
-   (zadania, zdarzenia, bramki, sekwencje) z ich pozycjami — nic nie ginie.
-   Świadomie wywoływana tylko wtedy, gdy getMpBpmnConversionInfo() (patrz
-   updateTree()) potwierdziła, że jest dokładnie jeden pool bez message flow —
-   w każdym innym przypadku operacja musiałaby coś skasować, więc przycisk
-   w ogóle się nie pojawia i ta funkcja nie jest wywoływana.
-   Działa na surowym XML (nie na żywym modelu) — saveXML() i tak odbudowuje
-   DI z aktualnego diagramu, więc edycja modelu bezpośrednio przez moddle
-   zostałaby nadpisana; edytujemy więc tekst/DOM i robimy jeden importXml(). */
+/* BPMN files from other tools often wrap the process in a bpmn:collaboration
+   (a single bpmn:participant/"pool"), even when in practice there's only one
+   process — and our structure tree (Process structure) only understands a
+   plain bpmn:process as the root, hence "No diagram". This function "flattens"
+   the diagram: it removes the collaboration/participant, switches the diagram's
+   root (BPMNPlane) to the process itself, and keeps ALL flow elements
+   (tasks, events, gateways, sequences) with their positions — nothing is lost.
+   Deliberately only called when getMpBpmnConversionInfo() (see
+   updateTree()) has confirmed there's exactly one pool with no message flow —
+   in every other case the operation would have to delete something, so the button
+   doesn't appear at all and this function is never called.
+   Operates on the raw XML (not the live model) — saveXML() rebuilds the
+   DI from the current diagram anyway, so editing the model directly via moddle
+   would get overwritten; so instead we edit the text/DOM and do a single importXml(). */
 async function convertToMpBpmn() {
   if (!modeler) return;
-  if (!getMpBpmnConversionInfo().canConvert) return; // patrz komentarz wyżej
+  if (!getMpBpmnConversionInfo().canConvert) return; // see comment above
   try {
     const BPMN_NS = 'http://www.omg.org/spec/BPMN/20100524/MODEL';
     const BPMNDI_NS = 'http://www.omg.org/spec/BPMN/20100524/DI';
@@ -1165,7 +1165,7 @@ async function copyXml() {
 
 function getElementMeta(bo, key) {
   try {
-    // Używamy prostego in-memory store z kluczem id elementu
+    // Use a simple in-memory store keyed by the element's id
     return (window._bpmnMeta && window._bpmnMeta[bo.id] && window._bpmnMeta[bo.id][key]) || '';
   } catch(e) { return ''; }
 }
@@ -1176,7 +1176,7 @@ function setElementMeta(bo, key, value) {
   window._bpmnMeta[bo.id][key] = value;
 }
 
-// Serializuj meta do XML jako documentation element
+// Serialize metadata to XML as a documentation element
 function flushMetaToModel() {
   if (!window._bpmnMeta || !modeler) return;
   const er = modeler.get('elementRegistry');
@@ -1185,7 +1185,7 @@ function flushMetaToModel() {
     const el = er.get(id);
     if (!el || !el.businessObject) return;
     const bo = el.businessObject;
-    // Zapisz jako JSON w pierwszym documentation element
+    // Save as JSON in the first documentation element
     const metaStr = JSON.stringify(data);
     try {
       modeling.updateProperties(el, {
@@ -1193,7 +1193,7 @@ function flushMetaToModel() {
         'custom:details': data.details || ''
       });
     } catch(e) {}
-    // Zapis w documentation
+    // Store in documentation
     try {
       const bpmnFactory = modeler.get('bpmnFactory');
       let docs = bo.documentation || [];
@@ -1782,7 +1782,7 @@ function resetTaskDefaultSize() {
   refreshSettingsDialogList();
 }
 
-// Auto-zapis pól gdy użytkownik opuszcza element
+// Auto-save fields when the user leaves the element
 let _autoSavePending = null;
 function autoSaveFields(elementId) {
   const desc = document.getElementById('prop-description-' + elementId);
@@ -1869,7 +1869,7 @@ function setElementLocation(elementId, locationId) {
 }
 
 const COLOR_PALETTE = [
-  // Pastelowe — happy path i oznaczenia
+  // Pastel — happy path and markers
   { hex: '#d4edda', label: 'Pastel green' },
   { hex: '#cce5ff', label: 'Pastel blue' },
   { hex: '#fff3cd', label: 'Pastel yellow' },
@@ -1878,7 +1878,7 @@ const COLOR_PALETTE = [
   { hex: '#fde2c8', label: 'Pastel orange' },
   { hex: '#d1ecf1', label: 'Pastel turquoise' },
   { hex: '#f5c6cb', label: 'Pastel pink' },
-  // Mocniejsze
+  // Stronger
   { hex: '#28a745', label: 'Green' },
   { hex: '#007bff', label: 'Blue' },
   { hex: '#ffc107', label: 'Yellow' },
@@ -1887,7 +1887,7 @@ const COLOR_PALETTE = [
   { hex: '#fd7e14', label: 'Orange' },
   { hex: '#17a2b8', label: 'Turquoise' },
   { hex: '#e83e8c', label: 'Pink' },
-  // Neutralne
+  // Neutral
   { hex: '#f8f9fa', label: 'Light gray' },
   { hex: '#dee2e6', label: 'Gray' },
   { hex: '#6c757d', label: 'Dark gray' },
@@ -1898,9 +1898,9 @@ const COLOR_PALETTE = [
   { hex: '#e3f2fd', label: 'Ice' },
 ];
 
-// Aktualnie wybrany kolor w pickerze
+// Currently selected color in the picker
 let pickerFill = '#d4edda';
-let pickerStroke = null; // null = auto (ciemniejszy od fill)
+let pickerStroke = null; // null = auto (darker than fill)
 
 function hexToRgb(hex) {
   const r = parseInt(hex.slice(1,3),16);
@@ -1963,7 +1963,7 @@ function applyColor(elementId, fill, stroke) {
   const strokeColor = stroke || darken(fill);
   modeling.setColor([el], { fill, stroke: strokeColor });
   setStatus('Color applied', 'ok');
-  // Odśwież panel
+  // Refresh the panel
   updatePropsPanel(modeler.get('selection').get());
 }
 
@@ -1980,7 +1980,7 @@ function clearColor(elementId) {
 function buildColorPicker(elementId) {
   const er = modeler.get('elementRegistry');
   const el = er.get(elementId);
-  // di jest dostępne przez element diagramu, nie przez businessObject bezpośrednio
+  // di is available via the diagram element, not directly via businessObject
   let currentFill = null;
   try {
     const diElement = el && el.di;
@@ -1988,7 +1988,7 @@ function buildColorPicker(elementId) {
   } catch(e) { currentFill = null; }
 
   let swatches = `<div class="color-palette">`;
-  // Swatch "brak koloru"
+  // "No color" swatch
   swatches += `<div class="color-swatch none${!currentFill ? ' active' : ''}" title="Remove color" onclick="clearColor('${escHtml(elementId)}')"></div>`;
   COLOR_PALETTE.forEach(c => {
     const isActive = currentFill && currentFill.toLowerCase() === c.hex.toLowerCase();
@@ -2063,10 +2063,10 @@ function updatePropsPanel(selection) {
   html += `<div class="prop-row"><div class="prop-name">Name</div><div class="prop-val">${escHtml(name || '—')}</div></div>`;
   html += `<div class="prop-row"><div class="prop-name">Type</div><div class="prop-val">${escHtml(type.replace('bpmn:',''))}</div></div>`;
 
-  // Size — dla dowolnego elementu z geometrią (nie połączenia/etykiety).
-  // Edytowalne pola tylko gdy bpmn-js faktycznie pozwala na resize danego
-  // typu (nasza reguła dla Tasków + wbudowane reguły dla Pool/Lane/expanded
-  // Sub-Process/Text Annotation/...) — w przeciwnym razie sam odczyt.
+  // Size — for any element with geometry (not a connection/label).
+  // Editable fields only when bpmn-js actually allows resizing this
+  // type (our rule for Tasks + the built-in rules for Pool/Lane/expanded
+  // Sub-Process/Text Annotation/...) — otherwise read-only.
   const hasSize = typeof el.width === 'number' && typeof el.height === 'number' && !el.waypoints && el.type !== 'label';
   if (hasSize) {
     const canResize = modeler.get('rules').allowed('shape.resize', { shape: el });
@@ -2091,7 +2091,7 @@ function updatePropsPanel(selection) {
     }
   }
 
-  // Color picker — dla wszystkich elementów które mają wypełnienie
+  // Color picker — for all elements that have a fill
   const NO_COLOR_TYPES = ['bpmn:SequenceFlow', 'bpmn:MessageFlow', 'bpmn:Association',
     'bpmn:DataInputAssociation', 'bpmn:DataOutputAssociation', 'bpmn:Lane', 'bpmn:Participant'];
   const supportsColor = !!type && !NO_COLOR_TYPES.includes(type);
@@ -2116,7 +2116,7 @@ function updatePropsPanel(selection) {
     html += `<button class="prop-btn" onclick="treeNavigateTo('${escHtml(id)}')">Enter subprocess ↗</button>`;
   }
 
-  // Pola Description i Details — dla wszystkich elementów z id
+  // Description and Details fields — for all elements with an id
   if (id && type && !['bpmn:SequenceFlow','bpmn:MessageFlow','bpmn:Association',
       'bpmn:DataInputAssociation','bpmn:DataOutputAssociation'].includes(type)) {
     const descVal = getElementMeta(bo, 'description');
@@ -2176,8 +2176,8 @@ function convertToCallActivity(elementId) {
   const el = er.get(elementId);
   if (!el) return;
   modeling.updateProperties(el, { $type: undefined });
-  // bpmn-js nie pozwala zmieniać $type przez updateProperties
-  // Użyjemy replaceShape żeby zmienić element na callActivity
+  // bpmn-js doesn't allow changing $type via updateProperties
+  // Use replaceShape to turn the element into a callActivity
   const bpmnFactory = modeler.get('bpmnFactory');
   const replace = modeler.get('bpmnReplace');
   replace.replaceElement(el, { type: 'bpmn:CallActivity' });
@@ -2216,7 +2216,7 @@ function escHtml(str) {
 
   function doResize(clientX) {
     if (!active) return;
-    // Przeciąganie w lewo → panel szerszy, w prawo → węższy
+    // Dragging left → wider panel, right → narrower
     const delta = startX - clientX;
     const newW = Math.min(520, Math.max(160, startW + delta));
     panel.style.width = newW + 'px';
@@ -2265,14 +2265,96 @@ canvasEl.addEventListener('drop', e => {
   overlayEl.classList.remove('visible');
   const file = e.dataTransfer.files[0];
   if (!file) return;
-  currentFileHandle = null; // przeciągnięty plik nie daje uchwytu do zapisu
-  forgetLastFileHandle(); // patrz komentarz w openFile()
+  currentFileHandle = null; // a dropped file doesn't give us a save handle
+  forgetLastFileHandle(); // see the comment in openFile()
   const reader = new FileReader();
   reader.onload = async ev => { await importXml(ev.target.result, file.name); updateAutosaveIndicator(); };
   reader.readAsText(file);
 });
 
-/* ─── SKRÓTY ─── */
+/* ─── HELP / USER GUIDE (?) ───
+   In-app guide covering everything the app can do (files, structure
+   navigation, properties, Systems/Locations, Extended details, XML panel,
+   Convert to M&P BPMN, shortcuts), in EN/PL/RU. Content lives in
+   help-content.js; this just renders it in a dialog with a language
+   switcher, same visual pattern as the Settings dialog above. */
+let helpLang = 'en';
+try { helpLang = localStorage.getItem('bpmnEditor.helpLang') || 'en'; } catch(e) {}
+
+function openHelp() {
+  const old = document.getElementById('help-dialog');
+  if (old) old.remove();
+
+  const dialog = document.createElement('div');
+  dialog.id = 'help-dialog';
+  dialog.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);z-index:1000;display:flex;align-items:center;justify-content:center;';
+  dialog.innerHTML = renderHelpDialogHtml();
+  document.body.appendChild(dialog);
+  dialog.addEventListener('click', e => { if (e.target === dialog) dialog.remove(); });
+}
+
+function renderHelpDialogHtml() {
+  const langs = [['en', 'EN'], ['pl', 'PL'], ['ru', 'RU']];
+  const tabs = langs.map(([code, label]) => {
+    const active = helpLang === code;
+    return `<button onclick="setHelpLang('${code}')" style="font-size:12px;padding:5px 14px;${active ? 'background:#1a6bb5;color:#fff;border-color:#1558a0;' : ''}">${label}</button>`;
+  }).join('');
+
+  return `<div style="background:#fff;border-radius:10px;width:720px;max-width:92vw;max-height:86vh;box-shadow:0 8px 32px rgba(0,0,0,0.18);display:flex;flex-direction:column;overflow:hidden;">
+    <div style="display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid #e8e8e4;flex-shrink:0;">
+      <div style="font-size:15px;font-weight:600;flex:1;">User guide</div>
+      <div style="display:flex;gap:4px;">${tabs}</div>
+      <button onclick="document.getElementById('help-dialog').remove()" style="font-size:13px;padding:5px 10px;">✕</button>
+    </div>
+    <div class="help-content" style="overflow-y:auto;padding:8px 24px 24px;">${HELP_CONTENT[helpLang]}</div>
+  </div>`;
+}
+
+function setHelpLang(lang) {
+  helpLang = lang;
+  try { localStorage.setItem('bpmnEditor.helpLang', lang); } catch(e) {}
+  const dialog = document.getElementById('help-dialog');
+  if (dialog) dialog.innerHTML = renderHelpDialogHtml();
+}
+
+/* ─── FIRST-TIME ONBOARDING CALLOUT ───
+   A coachmark pointing at the Help ("?") button so first-time users
+   notice it, with a dimming overlay behind it so it (and the highlighted
+   button) stand out. Shown once on first launch; dismissed for good (via
+   localStorage) as soon as it's closed, the overlay is clicked, or its
+   "HOW TO" button is used to open the guide. */
+(function initHelpOnboarding() {
+  let seen = false;
+  try { seen = localStorage.getItem('bpmnEditor.onboardingSeen') === '1'; } catch(e) {}
+  if (seen) return;
+
+  const el = document.getElementById('help-onboarding');
+  const overlay = document.getElementById('help-onboarding-overlay');
+  const toggleBtn = document.getElementById('help-toggle');
+  if (!el) return;
+
+  function dismissOnboarding() {
+    el.style.display = 'none';
+    if (overlay) overlay.style.display = 'none';
+    if (toggleBtn) toggleBtn.classList.remove('onboarding-highlight');
+    try { localStorage.setItem('bpmnEditor.onboardingSeen', '1'); } catch(e) {}
+  }
+
+  el.style.display = 'block';
+  if (overlay) overlay.style.display = 'block';
+  if (toggleBtn) toggleBtn.classList.add('onboarding-highlight');
+
+  const closeBtn = document.getElementById('help-onboarding-close');
+  const howToBtn = document.getElementById('help-onboarding-btn');
+  if (closeBtn) closeBtn.addEventListener('click', dismissOnboarding);
+  if (overlay) overlay.addEventListener('click', dismissOnboarding);
+  if (howToBtn) howToBtn.addEventListener('click', () => {
+    dismissOnboarding();
+    openHelp();
+  });
+})();
+
+/* ─── SHORTCUTS ─── */
 document.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveDiagram(); }
   if ((e.ctrlKey || e.metaKey) && e.key === 'o') { e.preventDefault(); triggerFileOpen(); }
