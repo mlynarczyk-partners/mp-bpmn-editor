@@ -20,3 +20,5 @@ npm-debug.log*
 # Local scratch / sample diagrams you don't want to publish
 /scratch/
 *.local.bpmn
+deploy_esnc.expect
+deploy_esnc.sftp
