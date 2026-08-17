@@ -338,6 +338,17 @@ function getMpBpmnConversionInfo() {
     if (participants.length !== 1) return { canConvert: false };
     if (messageFlows.length > 0) return { canConvert: false };
     if (!participants[0].processRef) return { canConvert: false };
+    // A pool's border/label is a Collaboration+Participant-only visual
+    // construct — a plain bpmn:process has no equivalent container, only
+    // lanes. If the process has lanes, flattening would delete the pool
+    // shape while leaving the lane shapes orphaned on the canvas. Don't
+    // offer the conversion at all in that case (nothing would be silently
+    // discarded some other way — see the "never discard anything silently"
+    // rule elsewhere in this file).
+    const processRef = participants[0].processRef;
+    const laneSets = processRef.laneSets || [];
+    const hasLanes = laneSets.some(ls => (ls.lanes || []).length > 0);
+    if (hasLanes) return { canConvert: false };
     return { canConvert: true };
   } catch (e) {
     return { canConvert: false };
