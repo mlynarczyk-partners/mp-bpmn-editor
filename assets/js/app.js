@@ -183,6 +183,33 @@ function getCurrentRoot() {
   return modeler.get('canvas').getRootElement();
 }
 
+// elementRegistry.getAll() returns EVERY element across the WHOLE diagram —
+// including ones that live on other planes entirely (e.g. shapes inside an
+// expanded sub-process you're not currently looking at). Badge/overlay code
+// that needs "what's actually on screen right now" should walk from the
+// current root instead, since that's the only thing scoped to the active
+// plane. bpmn-js keeps each plane's shapes in a normal parent/children tree
+// under that plane's root, so this recursion naturally stays within it.
+//
+// The root itself is deliberately excluded: after drilling into a
+// sub-process, canvas.getRootElement() returns a plane root whose
+// businessObject IS that sub-process (e.g. "FULFILLMENT") — it's the
+// container you're now standing inside, not a shape rendered on this plane.
+// Including it re-added that sub-process's own System/Location badge onto
+// its own (otherwise empty) inner canvas.
+function getElementsInCurrentPlane() {
+  const root = getCurrentRoot();
+  if (!root) return [];
+  const result = [];
+  (function walk(el) {
+    (el.children || []).forEach(child => {
+      result.push(child);
+      walk(child);
+    });
+  })(root);
+  return result;
+}
+
 function navigateTo(rootEl, label) {
   if (getCurrentRoot() === rootEl) return;
   const vp = modeler.get('canvas').viewbox();
@@ -234,7 +261,9 @@ function getBreadcrumbLabel(rootEl) {
   if (!rootEl) return '?';
   const bo = rootEl.businessObject;
   if (!bo) return rootEl.id || '?';
-  if (bo.$type === 'bpmn:Process') return getProcessDisplayName();
+  // bpmn:Collaboration is the top-level root for pool/lane-wrapped files —
+  // see findProcessRoot() — and represents the same "Main process" level.
+  if (bo.$type === 'bpmn:Process' || bo.$type === 'bpmn:Collaboration') return getProcessDisplayName();
   return bo.name || bo.id || 'Subprocess';
 }
 
@@ -256,7 +285,8 @@ function updateBreadcrumb() {
   // "Back to parent" button
   if (navStack.length > 0) {
     const parentEntry = navStack[navStack.length - 1];
-    const parentLabel = (parentEntry.rootEl && parentEntry.rootEl.businessObject && parentEntry.rootEl.businessObject.$type === 'bpmn:Process')
+    const parentType = parentEntry.rootEl && parentEntry.rootEl.businessObject && parentEntry.rootEl.businessObject.$type;
+    const parentLabel = (parentType === 'bpmn:Process' || parentType === 'bpmn:Collaboration')
       ? getProcessDisplayName()
       : parentEntry.label;
     html += `<button class="bc-back-btn" onclick="navigateUp()">↑ Back to: ${escHtml(parentLabel)}</button>`;
@@ -265,7 +295,8 @@ function updateBreadcrumb() {
   // Clickable path: every previous level
   navStack.forEach((item, i) => {
     // For the main (root) process, always show the current filename
-    const label = (item.rootEl && item.rootEl.businessObject && item.rootEl.businessObject.$type === 'bpmn:Process')
+    const itemType = item.rootEl && item.rootEl.businessObject && item.rootEl.businessObject.$type;
+    const label = (itemType === 'bpmn:Process' || itemType === 'bpmn:Collaboration')
       ? getProcessDisplayName()
       : item.label;
     html += `<span class="bc-item" onclick="navigateToIndex(${i})">${escHtml(label)}</span>`;
@@ -311,47 +342,53 @@ function findRootElementForBo(bo) {
   return found ? found.rootElement : null;
 }
 
+// The top-level "root" for navigation/breadcrumb purposes. For a bare
+// bpmn:process file this is that process's own plane. For a file wrapped in
+// a bpmn:collaboration (a pool, with or without lanes), bpmn-js never
+// creates a separate plane for the process itself — its flow nodes are
+// drawn directly on the collaboration's own plane — so we fall back to
+// that. Either way, this is the element the canvas actually navigates to;
+// use getMainProcessBo() below whenever the real bpmn:Process business
+// object (with its .flowElements) is what's needed instead.
 function findProcessRoot() {
   const canvasAny = modeler.get('canvas');
   const planes = canvasAny._planes || [];
-  const found = planes.find(p =>
+  const directProcess = planes.find(p =>
     p.rootElement && p.rootElement.businessObject &&
     p.rootElement.businessObject.$type === 'bpmn:Process'
   );
-  return found ? found.rootElement : null;
+  if (directProcess) return directProcess.rootElement;
+  const collabPlane = planes.find(p =>
+    p.rootElement && p.rootElement.businessObject &&
+    p.rootElement.businessObject.$type === 'bpmn:Collaboration'
+  );
+  return collabPlane ? collabPlane.rootElement : null;
 }
 
-// Converting from bpmn:collaboration to a plain bpmn:process is safe
-// (it discards nothing from the diagram) ONLY when there's exactly one pool with
-// no message flows — in every other case (2+ pools, message flows) the
-// operation would have to delete something, so we deliberately don't offer this
-// option at all, rather than warn and risk someone clicking without understanding.
-function getMpBpmnConversionInfo() {
-  if (!modeler) return { canConvert: false };
+// Process Structure is deliberately independent of pools/lanes: BPMN 2.0
+// lanes are a purely visual/organizational subdivision of a SINGLE process,
+// not a structural boundary, and a bpmn:collaboration wrapping one
+// participant is just that process wearing a pool border. This returns the
+// actual bpmn:Process business object (the one with real .flowElements) no
+// matter which of those two shapes the file is in, so the subprocess/call
+// activity tree and the "jump to nested subprocess" navigation both work
+// the same either way.
+function getMainProcessBo() {
+  if (!modeler) return null;
   try {
     const definitions = modeler.getDefinitions();
     const rootElements = definitions.rootElements || [];
+    const directProcess = rootElements.find(r => r.$type === 'bpmn:Process');
+    if (directProcess) return directProcess;
     const collaboration = rootElements.find(r => r.$type === 'bpmn:Collaboration');
-    if (!collaboration) return { canConvert: false };
-    const participants = collaboration.participants || [];
-    const messageFlows = collaboration.messageFlows || [];
-    if (participants.length !== 1) return { canConvert: false };
-    if (messageFlows.length > 0) return { canConvert: false };
-    if (!participants[0].processRef) return { canConvert: false };
-    // A pool's border/label is a Collaboration+Participant-only visual
-    // construct — a plain bpmn:process has no equivalent container, only
-    // lanes. If the process has lanes, flattening would delete the pool
-    // shape while leaving the lane shapes orphaned on the canvas. Don't
-    // offer the conversion at all in that case (nothing would be silently
-    // discarded some other way — see the "never discard anything silently"
-    // rule elsewhere in this file).
-    const processRef = participants[0].processRef;
-    const laneSets = processRef.laneSets || [];
-    const hasLanes = laneSets.some(ls => (ls.lanes || []).length > 0);
-    if (hasLanes) return { canConvert: false };
-    return { canConvert: true };
+    if (collaboration) {
+      const participants = collaboration.participants || [];
+      const withProcess = participants.find(p => p.processRef);
+      if (withProcess) return withProcess.processRef;
+    }
+    return null;
   } catch (e) {
-    return { canConvert: false };
+    return null;
   }
 }
 
@@ -360,29 +397,29 @@ function updateTree() {
   const currentRoot = getCurrentRoot();
 
   try {
-    // Find the main process
+    // Find the main process — independent of whether it's a bare
+    // bpmn:process or wrapped in a bpmn:collaboration (pool, with or
+    // without lanes). See getMainProcessBo() for why these two shapes are
+    // treated the same here. Reaching "No diagram" now only happens for
+    // genuinely unsupported shapes (e.g. 2+ participants, or a participant
+    // with no processRef at all) — there's no in-between case left that
+    // needs a manual conversion step.
     const processRoot = findProcessRoot();
-    if (!processRoot) {
-      const canConvert = getMpBpmnConversionInfo().canConvert;
-      treeEl.innerHTML = canConvert
-        ? `<div style="padding:12px;font-size:12px;color:#aaa;">
-            No diagram
-            <div style="margin-top:10px;">
-              <button onclick="convertToMpBpmn()" style="width:100%;font-size:12px;">Convert to M&amp;P BPMN</button>
-            </div>
-          </div>`
-        : '<div style="padding:12px;font-size:12px;color:#aaa;">No diagram</div>';
+    const processBo = getMainProcessBo();
+    if (!processRoot || !processBo) {
+      treeEl.innerHTML = '<div style="padding:12px;font-size:12px;color:#aaa;">No diagram</div>';
       return;
     }
 
-    const processBo = processRoot.businessObject;
     const subprocesses = buildSubprocessTree(processBo, 1);
     const currentBo = currentRoot ? currentRoot.businessObject : null;
 
     let html = '';
 
-    // Main process — show the filename
-    const isProcessActive = currentBo && currentBo.$type === 'bpmn:Process';
+    // Main process — show the filename. Active whether the canvas root is
+    // the bare process (no pool) or the collaboration itself (pool/lanes
+    // wrapping that same process) — both represent being "at the top".
+    const isProcessActive = currentBo && (currentBo.$type === 'bpmn:Process' || currentBo.$type === 'bpmn:Collaboration');
     const processDisplayName = getProcessDisplayName();
     html += `<div class="tree-item ${isProcessActive ? 'active' : ''}" onclick="treeNavigateTo(null)" title="${escHtml(processDisplayName)}">
       <span class="tree-icon process">◈</span>
@@ -468,6 +505,7 @@ function treeNavigateTo(subprocessId) {
 
   const targetBo = targetRoot.businessObject;
   const path = findPathToSubprocess(targetBo);
+  const mainProcessBo = getMainProcessBo();
 
   // Save the current viewport for the current level
   const currentVp = modeler.get('canvas').viewbox();
@@ -475,8 +513,17 @@ function treeNavigateTo(subprocessId) {
   // Build a new stack: for every ancestor of targetRoot, take the viewport from the old stack if present,
   // and for the current level save the current viewport
   const newStack = path.map(bo => {
-    const plane = planes.find(p => p.rootElement && p.rootElement.businessObject === bo);
-    const rootEl = plane ? plane.rootElement : null;
+    // The top-of-path entry is always the main process bo (see
+    // findPathToSubprocess()) — for a pool/lane-wrapped file there's no
+    // plane whose businessObject is that raw bpmn:Process, since its flow
+    // nodes are drawn directly on the collaboration's own plane. Resolve
+    // that one via findProcessRoot() instead of a plane lookup.
+    const rootEl = (bo === mainProcessBo)
+      ? findProcessRoot()
+      : (function() {
+          const plane = planes.find(p => p.rootElement && p.rootElement.businessObject === bo);
+          return plane ? plane.rootElement : null;
+        })();
     // Look for a saved viewport on the old stack
     const existingEntry = navStack.find(x => x.rootEl === rootEl);
     // If this is the current level — use the fresh viewport
@@ -570,9 +617,8 @@ function applyCallActivityTarget(elementId) {
 
 function findPathToSubprocess(targetBo) {
   // Returns an array of businessObjects from the main process down to targetBo's parent (excluding targetBo)
-  const processRoot = findProcessRoot();
-  if (!processRoot) return [];
-  const processBo = processRoot.businessObject;
+  const processBo = getMainProcessBo();
+  if (!processBo) return [];
 
   const path = [];
   function search(bo, current) {
@@ -605,8 +651,55 @@ const RESIZABLE_TASK_TYPES = ['bpmn:Task', 'bpmn:UserTask', 'bpmn:ServiceTask', 
 // typed "1" could produce a degenerate, effectively invisible shape.
 const MIN_SHAPE_SIZE = 10;
 
+// bpmn-js's stock palette ships the Text Annotation feature in full
+// (rendering, properties, the icon glyph) but doesn't expose a button to
+// create one from scratch — this small provider registers that missing
+// palette entry, right next to the built-in "Create group" tool, using the
+// same palette.registerProvider() extension point bpmn-js's own built-in
+// PaletteProvider is registered through (constructor + $inject, the
+// standard bpmn-js custom-module pattern). No custom rules needed: a Text
+// Annotation is a free-floating BPMN Artifact, valid with zero attachments,
+// and can optionally be linked to any element afterwards via a plain
+// Association (drawn with the palette's connect tool).
+function MpTextAnnotationPalette(palette, create, elementFactory) {
+  function startCreateTextAnnotation(event) {
+    const shape = elementFactory.createShape({ type: 'bpmn:TextAnnotation' });
+    create.start(event, shape);
+  }
+
+  // Priority BELOW bpmn-js's own default PaletteProvider (which registers
+  // at the implicit default of 1000) so it runs *after* — landing this
+  // entry at the end of the palette's "artifact" group (right after the
+  // built-in "Create group"), matching where a custom addition belongs,
+  // rather than jumping the whole artifact group to the front.
+  palette.registerProvider(500, {
+    getPaletteEntries: function() {
+      return {
+        'create.text-annotation': {
+          group: 'artifact',
+          className: 'bpmn-icon-text-annotation',
+          title: 'Create text annotation',
+          action: {
+            dragstart: startCreateTextAnnotation,
+            click: startCreateTextAnnotation
+          }
+        }
+      };
+    }
+  });
+}
+MpTextAnnotationPalette.$inject = ['palette', 'create', 'elementFactory'];
+
 function initModeler() {
-  modeler = new BpmnJS({ container: '#canvas' });
+  modeler = new BpmnJS({
+    container: '#canvas',
+    additionalModules: [
+      {
+        __init__: ['mpTextAnnotationPalette'],
+        mpTextAnnotationPalette: ['type', MpTextAnnotationPalette]
+      }
+    ]
+  });
 
   // bpmn-js renders the tool palette as a free-floating overlay (absolutely
   // positioned) inside the canvas container. Relocate its actual DOM node
@@ -829,6 +922,7 @@ function initModeler() {
   updateAutosaveIndicator();
   updateExtendedDetailsButton();
   updateGridButton();
+  focusCanvas();
 }
 
 /* ─── DIAGRAM OPERATIONS ─── */
@@ -847,6 +941,7 @@ async function newDiagram() {
     flushDictionariesToModel();
     refreshDetailOverlays();
     renderGridBackground();
+    focusCanvas();
   } catch(e) {
     setStatus('Error: ' + e.message, 'err');
   }
@@ -854,6 +949,23 @@ async function newDiagram() {
 
 function fitViewport() {
   try { modeler.get('canvas').zoom('fit-viewport'); } catch(e) {}
+}
+
+// bpmn-js already binds its own Ctrl/Cmd +, -, 0 (and Ctrl/Cmd+scroll)
+// zoom shortcuts to the diagram — but only once the canvas SVG itself has
+// received keyboard focus (e.g. after clicking on it). Until that first
+// click, those key combos fall straight through to the *browser's* own
+// page zoom instead, which Chrome/Safari share across every tab open to
+// the same site — for file:// diagrams, effectively every open tab — which
+// is exactly why zooming one tab could visibly zoom another. Explicitly
+// focusing the SVG right after it's created (and after every new/opened
+// diagram) means bpmn-js's own per-tab zoom shortcut is live from the
+// start, with no need to reimplement zoom in-app.
+function focusCanvas() {
+  try {
+    const svg = document.querySelector('#canvas svg');
+    if (svg) svg.focus();
+  } catch (e) {}
 }
 
 function undo() { modeler.get('commandStack').undo(); }
@@ -1066,86 +1178,9 @@ async function importXml(xml, filename) {
     updateTree();
     refreshDetailOverlays();
     renderGridBackground();
+    focusCanvas();
   } catch(e) {
     setStatus('Import error: ' + e.message, 'err');
-  }
-}
-
-/* BPMN files from other tools often wrap the process in a bpmn:collaboration
-   (a single bpmn:participant/"pool"), even when in practice there's only one
-   process — and our structure tree (Process structure) only understands a
-   plain bpmn:process as the root, hence "No diagram". This function "flattens"
-   the diagram: it removes the collaboration/participant, switches the diagram's
-   root (BPMNPlane) to the process itself, and keeps ALL flow elements
-   (tasks, events, gateways, sequences) with their positions — nothing is lost.
-   Deliberately only called when getMpBpmnConversionInfo() (see
-   updateTree()) has confirmed there's exactly one pool with no message flow —
-   in every other case the operation would have to delete something, so the button
-   doesn't appear at all and this function is never called.
-   Operates on the raw XML (not the live model) — saveXML() rebuilds the
-   DI from the current diagram anyway, so editing the model directly via moddle
-   would get overwritten; so instead we edit the text/DOM and do a single importXml(). */
-async function convertToMpBpmn() {
-  if (!modeler) return;
-  if (!getMpBpmnConversionInfo().canConvert) return; // see comment above
-  try {
-    const BPMN_NS = 'http://www.omg.org/spec/BPMN/20100524/MODEL';
-    const BPMNDI_NS = 'http://www.omg.org/spec/BPMN/20100524/DI';
-    const { xml: rawXml } = await modeler.saveXML({ format: true });
-
-    const doc = new DOMParser().parseFromString(rawXml, 'application/xml');
-    if (doc.querySelector('parsererror')) {
-      setStatus('Conversion error: could not parse current diagram', 'err');
-      return;
-    }
-
-    const collaboration = doc.getElementsByTagNameNS(BPMN_NS, 'collaboration')[0];
-    if (!collaboration) {
-      setStatus('Nothing to convert — no collaboration found', 'err');
-      return;
-    }
-
-    const participants = Array.from(collaboration.getElementsByTagNameNS(BPMN_NS, 'participant'));
-    const withProcess = participants.find(p => p.getAttribute('processRef'));
-    if (!withProcess) {
-      setStatus('Conversion error: no process found inside the collaboration', 'err');
-      return;
-    }
-    const processId = withProcess.getAttribute('processRef');
-    const processEl = Array.from(doc.getElementsByTagNameNS(BPMN_NS, 'process'))
-      .find(p => p.getAttribute('id') === processId);
-    if (!processEl) {
-      setStatus('Conversion error: referenced process not found', 'err');
-      return;
-    }
-
-    const participantIds = participants.map(p => p.getAttribute('id'));
-    const messageFlowIds = Array.from(collaboration.getElementsByTagNameNS(BPMN_NS, 'messageFlow'))
-      .map(m => m.getAttribute('id'));
-    const droppedIds = new Set(participantIds.concat(messageFlowIds));
-    const collabId = collaboration.getAttribute('id');
-
-    Array.from(doc.getElementsByTagNameNS(BPMNDI_NS, 'BPMNPlane')).forEach(plane => {
-      if (plane.getAttribute('bpmnElement') === collabId) {
-        plane.setAttribute('bpmnElement', processId);
-      }
-      Array.from(plane.children).forEach(child => {
-        const ref = child.getAttribute('bpmnElement');
-        if (ref && droppedIds.has(ref)) plane.removeChild(child);
-      });
-    });
-
-    collaboration.parentNode.removeChild(collaboration);
-
-    let outXml = new XMLSerializer().serializeToString(doc);
-    if (!outXml.startsWith('<?xml')) {
-      outXml = '<?xml version="1.0" encoding="UTF-8"?>\n' + outXml;
-    }
-
-    await importXml(outXml, currentFilename ? currentFilename + '.bpmn' : undefined);
-    setStatus('Converted to M&P BPMN', 'ok');
-  } catch (e) {
-    setStatus('Conversion error: ' + e.message, 'err');
   }
 }
 
@@ -1332,8 +1367,13 @@ function refreshDetailOverlays() {
 
   if (!extendedDetailsEnabled) return;
 
-  const er = modeler.get('elementRegistry');
-  er.getAll().forEach(el => {
+  // Only elements on the plane you're actually looking at — using the full
+  // elementRegistry here previously leaked badges from a collapsed
+  // sub-process shape (e.g. a System tag set on the sub-process itself, on
+  // the main diagram) into that sub-process's own empty canvas once you
+  // navigated inside it, since bpmn-js re-renders overlays whenever a
+  // matching businessObject exists anywhere, not just on the current plane.
+  getElementsInCurrentPlane().forEach(el => {
     // Some elements (currently: Groups with a name set) get a *separate*
     // registry entry for their external label — e.g. "Group_1_label" next
     // to "Group_1" — which shares the same businessObject as the shape it
@@ -2286,9 +2326,9 @@ canvasEl.addEventListener('drop', e => {
 /* ─── HELP / USER GUIDE (?) ───
    In-app guide covering everything the app can do (files, structure
    navigation, properties, Systems/Locations, Extended details, XML panel,
-   Convert to M&P BPMN, shortcuts), in EN/PL/RU. Content lives in
-   help-content.js; this just renders it in a dialog with a language
-   switcher, same visual pattern as the Settings dialog above. */
+   shortcuts), in EN/PL/RU. Content lives in help-content.js; this just
+   renders it in a dialog with a language switcher, same visual pattern as
+   the Settings dialog above. */
 let helpLang = 'en';
 try { helpLang = localStorage.getItem('bpmnEditor.helpLang') || 'en'; } catch(e) {}
 
@@ -2372,6 +2412,18 @@ document.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
   if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); redo(); }
   if (e.key === 'Escape' && navStack.length > 0) navigateUp();
+  // bpmn-js's own diagram already binds Ctrl/Cmd +, -, 0 to its own
+  // per-tab zoom once the canvas has focus (see focusCanvas()) — so we
+  // don't re-implement the zoom itself here (that would double it up on
+  // every press). What bpmn-js's handler does NOT do is call
+  // preventDefault(), so left alone, the *browser's* native page zoom
+  // would still fire on top of it — and that's the part that's shared
+  // across every tab open to the same site, which was the actual bug
+  // report. Suppressing just the browser's default here is enough to stop
+  // that; bpmn-js's own listener still runs normally afterwards.
+  if ((e.ctrlKey || e.metaKey) && (e.key === '+' || e.key === '=' || e.key === '-' || e.key === '0')) {
+    e.preventDefault();
+  }
 });
 
 if (typeof BpmnJS !== 'undefined') {

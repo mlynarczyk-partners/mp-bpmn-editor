@@ -53,9 +53,6 @@ const HELP_CONTENT = {
 <h3>XML panel</h3>
 <p>The <b>XML</b> button opens a side panel with the raw underlying XML of your diagram. You can inspect it, hand-edit it, click <b>Import changes</b> to apply your edits back to the diagram, or <b>Copy XML</b> to the clipboard.</p>
 
-<h3>Convert to M&amp;P BPMN</h3>
-<p>Files created in other tools sometimes wrap the whole process in a "collaboration" with a single pool, which this editor's Process structure panel doesn't recognize — you'll see "No diagram" instead of your process tree. When that's safe to fix (exactly one pool, no message flows — i.e. nothing would be discarded), a <b>Convert to M&amp;P BPMN</b> button appears so you can flatten the file to a plain process with one click. If converting could discard anything, the button simply doesn't appear.</p>
-
 <h3>Keyboard shortcuts</h3>
 <ul>
 <li><b>Ctrl/Cmd + S</b> — Save</li>
@@ -117,9 +114,6 @@ const HELP_CONTENT = {
 <h3>Panel XML</h3>
 <p>Przycisk <b>XML</b> otwiera boczny panel z surowym kodem XML diagramu. Można go przejrzeć, ręcznie zedytować, kliknąć <b>Import changes</b>, żeby wprowadzić zmiany z powrotem do diagramu, albo <b>Copy XML</b>, żeby skopiować go do schowka.</p>
 
-<h3>Convert to M&amp;P BPMN</h3>
-<p>Pliki utworzone w innych narzędziach czasem owijają cały proces w „collaboration" z jedną pulą (pool), czego panel Process structure tego edytora nie rozpoznaje — zamiast drzewka procesu zobaczysz wtedy „No diagram". Gdy taka naprawa jest bezpieczna (dokładnie jedna pula, brak message flow — czyli nic by nie zostało utracone), pojawia się przycisk <b>Convert to M&amp;P BPMN</b>, który jednym kliknięciem spłaszcza plik do zwykłego procesu. Jeśli konwersja mogłaby coś skasować, przycisk po prostu się nie pojawia.</p>
-
 <h3>Skróty klawiszowe</h3>
 <ul>
 <li><b>Ctrl/Cmd + S</b> — zapisz</li>
@@ -180,9 +174,6 @@ const HELP_CONTENT = {
 
 <h3>Панель XML</h3>
 <p>Кнопка <b>XML</b> открывает боковую панель с исходным XML-кодом диаграммы. Его можно просмотреть, отредактировать вручную, нажать <b>Import changes</b>, чтобы применить изменения обратно к диаграмме, или <b>Copy XML</b>, чтобы скопировать его в буфер обмена.</p>
-
-<h3>Convert to M&amp;P BPMN</h3>
-<p>Файлы, созданные в других инструментах, иногда оборачивают весь процесс в «collaboration» с единственным пулом — панель Process structure этого редактора такое не распознаёт, и вместо дерева процесса вы увидите «No diagram». Если исправление безопасно (ровно один пул, нет message flow — то есть ничего не будет потеряно), появляется кнопка <b>Convert to M&amp;P BPMN</b>, которая одним кликом «разворачивает» файл в обычный процесс. Если конвертация могла бы что-то удалить, кнопка просто не появляется.</p>
 
 <h3>Горячие клавиши</h3>
 <ul>

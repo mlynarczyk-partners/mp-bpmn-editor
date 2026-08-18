@@ -41,9 +41,6 @@ Made by [Mlynarczyk & Partners](https://mlynarczyk-partners.com/en/home/).
 ### XML panel
 - View and hand-edit the underlying XML, re-import it, or copy it to the clipboard.
 
-### Convert to M&P BPMN
-- Files from other tools often wrap a single process in a `bpmn:collaboration`/pool, which this editor's structure panel doesn't recognize. When the conversion can be done without discarding anything (exactly one pool, no message flows), a one-click button flattens the file to a plain process.
-
 ## Getting started
 
 This is a static app with no build step and no dependencies to install:
