@@ -650,6 +650,63 @@ function applyCallActivityTarget(elementId) {
   updatePropsPanel(modeler.get('selection').get());
 }
 
+// Generic confirm/prompt modals — this app never uses native confirm()/
+// prompt() (they block synchronously and can't be styled), so every
+// destructive or name-entry action gets one of these instead, matching the
+// visual pattern already used by openCallActivitySelector().
+function openConfirmModal(title, message, onConfirm) {
+  const old = document.getElementById('confirm-modal');
+  if (old) old.remove();
+
+  const dialog = document.createElement('div');
+  dialog.id = 'confirm-modal';
+  dialog.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);z-index:1100;display:flex;align-items:center;justify-content:center;';
+  dialog.innerHTML = `<div style="background:#fff;border-radius:10px;padding:20px;min-width:320px;max-width:440px;box-shadow:0 8px 32px rgba(0,0,0,0.18);">
+    <div style="font-size:14px;font-weight:500;margin-bottom:8px;">${escHtml(title)}</div>
+    <div style="font-size:13px;color:#555;margin-bottom:16px;">${escHtml(message)}</div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;">
+      <button onclick="document.getElementById('confirm-modal').remove()" style="font-size:13px;padding:5px 14px;">Cancel</button>
+      <button onclick="_confirmModalOk()" style="font-size:13px;padding:5px 14px;background:#c0392b;color:#fff;border-color:#a02f22;">Delete</button>
+    </div>
+  </div>`;
+  document.body.appendChild(dialog);
+  dialog.addEventListener('click', e => { if (e.target === dialog) dialog.remove(); });
+  window._confirmModalOk = function() {
+    const el = document.getElementById('confirm-modal');
+    if (el) el.remove();
+    onConfirm();
+  };
+}
+
+function openPromptModal(title, placeholder, defaultValue, onSubmit) {
+  const old = document.getElementById('prompt-modal');
+  if (old) old.remove();
+
+  const dialog = document.createElement('div');
+  dialog.id = 'prompt-modal';
+  dialog.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);z-index:1100;display:flex;align-items:center;justify-content:center;';
+  dialog.innerHTML = `<div style="background:#fff;border-radius:10px;padding:20px;min-width:320px;max-width:440px;box-shadow:0 8px 32px rgba(0,0,0,0.18);">
+    <div style="font-size:14px;font-weight:500;margin-bottom:10px;">${escHtml(title)}</div>
+    <input type="text" id="prompt-modal-input" value="${escHtml(defaultValue || '')}" placeholder="${escHtml(placeholder || '')}"
+      style="width:100%;box-sizing:border-box;font-size:13px;padding:6px 8px;border:1px solid #d0d0cc;border-radius:5px;margin-bottom:14px;">
+    <div style="display:flex;gap:8px;justify-content:flex-end;">
+      <button onclick="document.getElementById('prompt-modal').remove()" style="font-size:13px;padding:5px 14px;">Cancel</button>
+      <button onclick="_promptModalOk()" style="font-size:13px;padding:5px 14px;background:#1a6bb5;color:#fff;border-color:#1558a0;">OK</button>
+    </div>
+  </div>`;
+  document.body.appendChild(dialog);
+  dialog.addEventListener('click', e => { if (e.target === dialog) dialog.remove(); });
+  const input = dialog.querySelector('#prompt-modal-input');
+  window._promptModalOk = function() {
+    const val = input.value;
+    const el = document.getElementById('prompt-modal');
+    if (el) el.remove();
+    onSubmit(val);
+  };
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') window._promptModalOk(); });
+  setTimeout(() => input.focus(), 0);
+}
+
 function findPathToSubprocess(targetBo) {
   // Returns an array of businessObjects from the main process down to targetBo's parent (excluding targetBo)
   const processBo = getMainProcessBo();
@@ -1309,7 +1366,11 @@ async function importXml(xml, filename) {
     // dropping local-only entries not yet saved into any file.
     const embeddedDicts = loadDictionariesFromModel();
     if (embeddedDicts) {
-      dictionaries = mergeDictionaries(dictionaries, embeddedDicts);
+      // A file saved by an older version of the app embeds the legacy
+      // { systems, locations, devices } shape — migrate it the same way a
+      // legacy localStorage value would be, before merging.
+      const embeddedNormalized = Array.isArray(embeddedDicts.list) ? normalizeDictionaries(embeddedDicts) : migrateLegacyDictionaries(embeddedDicts);
+      dictionaries = mergeDictionaries(dictionaries, embeddedNormalized);
       saveDictionaries();
     }
     flushDictionariesToModel();
@@ -1629,68 +1690,96 @@ function refreshDetailOverlays() {
     const elWidth = el.width || 100;
     const maxWidthPx = elWidth * DICT_BADGE_MAX_WIDTH_RATIO;
 
-    const systemId = (getElementMeta(bo, 'system') || '').trim();
-    const system = systemId ? getSystemById(systemId) : null;
-    if (system) {
-      try {
-        const textColor = contrastTextColor(system.color);
-        // Below the element: grows downward naturally as it wraps, so no
-        // position math is needed beyond the usual fixed gap.
-        const overlayId = overlays.add(el, 'system-badge', {
-          position: { left: 0, bottom: -SYSTEM_BADGE_GAP },
-          html: `<span class="system-badge-overlay" style="background:${escHtml(system.color)}; color:${textColor}; max-width:${maxWidthPx}px; width:max-content;"
-            title="System: ${escHtml(system.name || '')}">${escHtml(system.name || '?')}</span>`
-        });
-        detailOverlayIds.push(overlayId);
-      } catch(e) {
-        // element may not have its own graphical representation — skip
-      }
-    }
-
-    const locationId = (getElementMeta(bo, 'location') || '').trim();
-    const location = locationId ? getLocationById(locationId) : null;
-    if (location) {
-      try {
-        const textColor = contrastTextColor(location.color);
-        const labelText = location.name || '?';
-        // Above the element: measure the real rendered height first (1 line
-        // vs. wrapped 2 lines) so the badge grows UPWARD — the gap right
-        // above the element stays fixed, only the top edge moves higher.
-        const badgeHeight = measureBadgeHeight('location-badge-overlay', labelText, maxWidthPx);
-        const overlayId = overlays.add(el, 'location-badge', {
-          position: { top: -(LOCATION_OVERLAY_GAP + LOCATION_OVERLAY_TOP_CORRECTION + badgeHeight), left: 0 },
-          html: `<span class="location-badge-overlay" style="background:${escHtml(location.color)}; color:${textColor}; max-width:${maxWidthPx}px; width:max-content;"
-            title="Location: ${escHtml(location.name || '')}">${escHtml(labelText)}</span>`
-        });
-        detailOverlayIds.push(overlayId);
-      } catch(e) {
-        // element may not have its own graphical representation — skip
-      }
-    }
-
-    const deviceId = (getElementMeta(bo, 'device') || '').trim();
-    const device = deviceId ? getDeviceById(deviceId) : null;
-    if (device) {
-      try {
-        const textColor = contrastTextColor(device.color);
-        const labelText = device.name || '?';
-        // Below the element, right side (mirror of the System badge, which
-        // sits below on the left) — grows LEFTWARD as it wraps/widens, so
-        // unlike System (which just needs left:0) we measure the rendered
-        // width first and use it as the "right" offset to keep the badge's
-        // own right edge pinned to the element's right edge.
-        const badgeWidth = measureBadgeWidth('device-badge-overlay', labelText, maxWidthPx);
-        const overlayId = overlays.add(el, 'device-badge', {
-          position: { right: badgeWidth, bottom: -SYSTEM_BADGE_GAP },
-          html: `<span class="device-badge-overlay" style="background:${escHtml(device.color)}; color:${textColor}; max-width:${maxWidthPx}px; width:max-content;"
-            title="Device: ${escHtml(device.name || '')}">${escHtml(labelText)}</span>`
-        });
-        detailOverlayIds.push(overlayId);
-      } catch(e) {
-        // element may not have its own graphical representation — skip
-      }
-    }
+    detailOverlayIds.push(...renderDictBadgesForElement(el, bo, maxWidthPx, overlays));
   });
+}
+
+// Renders every dictionary's badge for one element, grouped by the 4
+// visible positions (Hide is simply skipped) and stacked within each group
+// — ascending by that dictionary's own "sort" number, read top-to-bottom on
+// screen. That single rule naturally produces the asymmetry the position
+// picker implies: for a TOP group (badges sit above the element, growing
+// upward) the row nearest the element is the LAST one placed, i.e. the
+// HIGHEST sort; for a BOTTOM group (badges sit below, growing downward) the
+// row nearest the element is the FIRST one placed, i.e. the LOWEST sort.
+// Returns the list of overlay ids added, for the caller to track for later
+// removal (same contract as the rest of refreshDetailOverlays()).
+function renderDictBadgesForElement(el, bo, maxWidthPx, overlays) {
+  const addedIds = [];
+
+  // Collect one entry per dictionary that actually has a value set on this
+  // element AND isn't set to Hide — grouped by resolved position.
+  const groups = { 'left-top': [], 'right-top': [], 'left-bottom': [], 'right-bottom': [] };
+  (dictionaries.list || []).forEach(dict => {
+    if (!dict || dict.position === 'hide' || !groups[dict.position]) return;
+    const valueId = (getElementMeta(bo, dict.metaKey) || '').trim();
+    if (!valueId) return;
+    const item = (dict.items || []).find(it => it.id === valueId);
+    if (!item) return;
+    groups[dict.position].push({ dict, item });
+  });
+
+  Object.keys(groups).forEach(position => {
+    const entries = groups[position];
+    if (!entries.length) return;
+
+    const isTop = position === 'left-top' || position === 'right-top';
+    const isRight = position === 'right-top' || position === 'right-bottom';
+
+    // Nearest-to-the-element item goes first in this order — see comment
+    // above for why that's ascending sort for a BOTTOM group but descending
+    // sort for a TOP group.
+    const ordered = entries.slice().sort((a, b) =>
+      isTop ? (b.dict.sort - a.dict.sort) : (a.dict.sort - b.dict.sort)
+    );
+
+    // Running distance from the element's own edge to the near edge of the
+    // next badge to place — seeded at the same gap a single badge already
+    // used (so a lone badge in a group renders pixel-identical to before
+    // this feature existed), then grown by each placed badge's own size
+    // plus a gap, so later (farther) badges stack progressively outward.
+    let runningOffset = isTop ? (LOCATION_OVERLAY_GAP + LOCATION_OVERLAY_TOP_CORRECTION) : SYSTEM_BADGE_GAP;
+
+    ordered.forEach(({ dict, item }) => {
+      const labelText = item.name || '?';
+      const textColor = contrastTextColor(item.color);
+      const className = 'dict-badge-overlay';
+      const html = `<span class="${className}" style="background:${escHtml(item.color)}; color:${textColor}; max-width:${maxWidthPx}px; width:max-content;"
+        title="${escHtml(dict.name || '')}: ${escHtml(item.name || '')}">${escHtml(labelText)}</span>`;
+
+      try {
+        if (isTop) {
+          // Grows upward: measure height first so the badge's OWN bottom
+          // edge lands exactly `runningOffset` above the element (or the
+          // next badge out), same reasoning the single-badge Location code
+          // used to use.
+          const badgeHeight = measureBadgeHeight(className, labelText, maxWidthPx);
+          const positionSpec = { top: -(runningOffset + badgeHeight) };
+          if (isRight) positionSpec.right = measureBadgeWidth(className, labelText, maxWidthPx);
+          else positionSpec.left = 0;
+          const overlayId = overlays.add(el, 'dict-badge', { position: positionSpec, html });
+          addedIds.push(overlayId);
+          runningOffset += badgeHeight + SYSTEM_BADGE_GAP;
+        } else {
+          // Grows downward: the badge's own top edge is `runningOffset`
+          // below the element (or the previous, nearer badge) — no height
+          // needed for ITS OWN placement, only to know how far to push
+          // whatever comes after it.
+          const positionSpec = { bottom: -runningOffset };
+          if (isRight) positionSpec.right = measureBadgeWidth(className, labelText, maxWidthPx);
+          else positionSpec.left = 0;
+          const overlayId = overlays.add(el, 'dict-badge', { position: positionSpec, html });
+          addedIds.push(overlayId);
+          const badgeHeight = measureBadgeHeight(className, labelText, maxWidthPx);
+          runningOffset += badgeHeight + SYSTEM_BADGE_GAP;
+        }
+      } catch (e) {
+        // element may not have its own graphical representation — skip
+      }
+    });
+  });
+
+  return addedIds;
 }
 
 /* ─── GRID BACKGROUND (#) ───
@@ -2014,18 +2103,70 @@ const DICTIONARIES_STORAGE_KEY = 'bpmnEditor.dictionaries';
 // the fallback/placeholder when no custom default has been configured.
 const BPMN_DEFAULT_TASK_SIZE = { width: 100, height: 80 };
 
+// The 5 places a dictionary's badges can appear (or nowhere at all).
+const DICT_POSITIONS = ['hide', 'left-top', 'right-top', 'left-bottom', 'right-bottom'];
+const DICT_POSITION_LABELS = { hide: 'Hide', 'left-top': 'Left Top', 'right-top': 'Right Top', 'left-bottom': 'Left Bottom', 'right-bottom': 'Right Bottom' };
+
+// A brand-new install (nothing in localStorage yet, ever) starts with the 3
+// built-in dictionaries present but empty and hidden — nothing to show
+// until the user actually sets them up, rather than surprising a first-time
+// user with badges/positions they never configured.
+function defaultDictionaries() {
+  return {
+    list: [
+      { id: 'system', name: 'Systems', builtIn: true, metaKey: 'system', position: 'hide', sort: 1, items: [] },
+      { id: 'location', name: 'Locations', builtIn: true, metaKey: 'location', position: 'hide', sort: 1, items: [] },
+      { id: 'device', name: 'Device', builtIn: true, metaKey: 'device', position: 'hide', sort: 1, items: [] }
+    ],
+    taskDefaultSize: null
+  };
+}
+
+// Upgrades the old fixed { systems, locations, devices } shape (from before
+// per-dictionary position/sort and custom dictionaries existed) into the
+// current { list: [...] } shape. Positions are set to whatever the old,
+// non-configurable hardcoded layout actually was (System below-left,
+// Location above-left, Device below-right) so an existing user's diagram
+// looks visually IDENTICAL right after this upgrade — nothing should
+// appear to move or disappear just because the storage format changed.
+function migrateLegacyDictionaries(old) {
+  return {
+    list: [
+      { id: 'system', name: 'Systems', builtIn: true, metaKey: 'system', position: 'left-bottom', sort: 1, items: old.systems || [] },
+      { id: 'location', name: 'Locations', builtIn: true, metaKey: 'location', position: 'left-top', sort: 1, items: old.locations || [] },
+      { id: 'device', name: 'Device', builtIn: true, metaKey: 'device', position: 'right-bottom', sort: 1, items: old.devices || [] }
+    ],
+    taskDefaultSize: old.taskDefaultSize || null
+  };
+}
+
+// Defensive normalization for the current shape — fills in anything
+// missing/malformed (e.g. hand-edited localStorage, or a future field this
+// version doesn't know about yet) rather than letting a bad entry crash
+// rendering.
+function normalizeDictionaries(parsed) {
+  const list = (Array.isArray(parsed.list) ? parsed.list : []).map(d => ({
+    id: d && d.id || ('dict_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)),
+    name: (d && d.name) || '',
+    builtIn: !!(d && d.builtIn),
+    metaKey: (d && d.metaKey) || (d && d.id) || '',
+    position: (d && DICT_POSITIONS.includes(d.position)) ? d.position : 'hide',
+    sort: (d && typeof d.sort === 'number' && isFinite(d.sort)) ? d.sort : 1,
+    items: Array.isArray(d && d.items) ? d.items : []
+  }));
+  return { list, taskDefaultSize: (parsed && parsed.taskDefaultSize) || null };
+}
+
 function loadDictionaries() {
   try {
     const raw = localStorage.getItem(DICTIONARIES_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (!parsed.systems) parsed.systems = [];
-      if (!parsed.locations) parsed.locations = [];
-      if (!parsed.devices) parsed.devices = [];
-      return parsed;
+      if (Array.isArray(parsed.list)) return normalizeDictionaries(parsed);
+      return migrateLegacyDictionaries(parsed);
     }
   } catch (e) {}
-  return { systems: [], locations: [], devices: [] };
+  return defaultDictionaries();
 }
 
 function saveDictionaries() {
@@ -2034,16 +2175,14 @@ function saveDictionaries() {
 
 let dictionaries = loadDictionaries();
 
-function getSystemById(id) {
-  return (dictionaries.systems || []).find(s => s.id === id) || null;
+function findDictionary(dictId) {
+  return (dictionaries.list || []).find(d => d.id === dictId) || null;
 }
 
-function getLocationById(id) {
-  return (dictionaries.locations || []).find(l => l.id === id) || null;
-}
-
-function getDeviceById(id) {
-  return (dictionaries.devices || []).find(d => d.id === id) || null;
+function getDictItemById(dictId, itemId) {
+  const dict = findDictionary(dictId);
+  if (!dict || !itemId) return null;
+  return (dict.items || []).find(it => it.id === itemId) || null;
 }
 
 // Called after any add/edit/remove — persists to localStorage (per-computer
@@ -2114,22 +2253,34 @@ function loadDictionariesFromModel() {
   return null;
 }
 
-// File wins for entries that exist in both (same id); local-only entries
-// (not yet saved into any file) are kept rather than dropped.
+// File wins for ITEMS that exist in both a local and an incoming dictionary
+// (matched by item id); local-only items (not yet saved into any file) are
+// kept rather than dropped. A dictionary present in the file but not
+// locally (e.g. a custom one someone else added) is adopted wholesale —
+// name, position, sort and all. A dictionary that already exists locally
+// keeps this computer's own name/position/sort (those are presentation
+// choices for this machine, same spirit as dictionaries always having been
+// a per-computer default) — only its items get merged in from the file.
 function mergeDictionaries(local, incoming) {
-  if (!incoming) return local;
-  const merged = { systems: [...(local.systems || [])], locations: [...(local.locations || [])], devices: [...(local.devices || [])] };
-  ['systems', 'locations', 'devices'].forEach(cat => {
-    (incoming[cat] || []).forEach(item => {
-      const idx = merged[cat].findIndex(x => x.id === item.id);
-      if (idx >= 0) merged[cat][idx] = item;
-      else merged[cat].push(item);
+  if (!incoming || !Array.isArray(incoming.list)) return local;
+  const mergedList = (local.list || []).map(d => ({ ...d, items: [...(d.items || [])] }));
+  incoming.list.forEach(incomingDict => {
+    if (!incomingDict || !incomingDict.id) return;
+    const localDict = mergedList.find(d => d.id === incomingDict.id);
+    if (!localDict) {
+      mergedList.push({ ...incomingDict, items: [...(incomingDict.items || [])] });
+      return;
+    }
+    (incomingDict.items || []).forEach(item => {
+      const idx = localDict.items.findIndex(x => x.id === item.id);
+      if (idx >= 0) localDict.items[idx] = item;
+      else localDict.items.push(item);
     });
   });
-  // File wins for taskDefaultSize too (same rule as systems/locations entries);
-  // fall back to whatever we already had locally if the file doesn't carry one.
-  merged.taskDefaultSize = incoming.taskDefaultSize || local.taskDefaultSize || null;
-  return merged;
+  return {
+    list: mergedList,
+    taskDefaultSize: incoming.taskDefaultSize || local.taskDefaultSize || null
+  };
 }
 
 function openSettingsDictionary() {
@@ -2144,14 +2295,14 @@ function openSettingsDictionary() {
   dialog.addEventListener('click', e => { if (e.target === dialog) dialog.remove(); });
 }
 
-function renderDictRows(items, listId, updateFn, removeFn) {
+function renderDictRows(dictId, items) {
   return items.map((s, i) => `
     <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #f0f0ec;">
-      <input type="color" value="${s.color}" onchange="${updateFn}(${i}, 'color', this.value)"
+      <input type="color" value="${s.color}" onchange="updateDictItemField('${dictId}', ${i}, 'color', this.value)"
         style="width:32px;height:28px;border:1px solid #d0d0cc;border-radius:5px;padding:1px;cursor:pointer;">
-      <input type="text" value="${escHtml(s.name)}" placeholder="Name" onchange="${updateFn}(${i}, 'name', this.value)"
+      <input type="text" value="${escHtml(s.name)}" placeholder="Name" onchange="updateDictItemField('${dictId}', ${i}, 'name', this.value)"
         style="flex:1;font-size:13px;padding:5px 8px;border:1px solid #d0d0cc;border-radius:5px;">
-      <button title="Remove" onclick="${removeFn}(${i})"
+      <button title="Remove" onclick="removeDictItem('${dictId}', ${i})"
         style="font-size:12px;padding:4px 8px;border-color:#c0392b;color:#c0392b;">✕</button>
     </div>`
   ).join('');
@@ -2174,17 +2325,35 @@ function renderAppColorRow(label, key) {
 }
 
 function renderSettingsDialogHtml() {
-  const systems = dictionaries.systems || [];
-  const systemRows = renderDictRows(systems, 'dict-systems-list', 'updateDictSystemField', 'removeDictSystem')
-    || '<div style="padding:12px 0;font-size:12px;color:#aaa;">No systems yet — add one below.</div>';
-
-  const locations = dictionaries.locations || [];
-  const locationRows = renderDictRows(locations, 'dict-locations-list', 'updateDictLocationField', 'removeDictLocation')
-    || '<div style="padding:12px 0;font-size:12px;color:#aaa;">No locations yet — add one below.</div>';
-
-  const devices = dictionaries.devices || [];
-  const deviceRows = renderDictRows(devices, 'dict-devices-list', 'updateDictDeviceField', 'removeDictDevice')
-    || '<div style="padding:12px 0;font-size:12px;color:#aaa;">No devices yet — add one below.</div>';
+  // Each dictionary renders as its own block: an editable name (point 6),
+  // its item rows, then one row holding "+ Add item", the position select
+  // (point 4 — 5 options), a Sort number input, and the delete button — all
+  // at the same height, per the user's explicit placement instruction.
+  const dictBlocksHtml = (dictionaries.list || []).map(dict => {
+    const rows = renderDictRows(dict.id, dict.items || [])
+      || '<div style="padding:8px 0;font-size:12px;color:#aaa;">No items yet — add one below.</div>';
+    const positionOptions = DICT_POSITIONS.map(p =>
+      `<option value="${p}" ${dict.position === p ? 'selected' : ''}>${DICT_POSITION_LABELS[p]}</option>`
+    ).join('');
+    return `
+      <div style="margin-bottom:18px;padding-bottom:14px;border-bottom:1px solid #eee;">
+        <input type="text" value="${escHtml(dict.name)}" placeholder="Dictionary name"
+          onchange="renameDictionary('${dict.id}', this.value)"
+          style="width:100%;box-sizing:border-box;font-size:14px;font-weight:500;padding:5px 8px;border:1px solid #d0d0cc;border-radius:5px;margin-bottom:6px;">
+        <div>${rows}</div>
+        <div style="display:flex;align-items:center;gap:6px;margin-top:8px;flex-wrap:wrap;">
+          <button onclick="addDictItem('${dict.id}')" style="font-size:12px;padding:5px 10px;">+ Add item</button>
+          <select onchange="updateDictPosition('${dict.id}', this.value)" style="font-size:12px;padding:5px 6px;border:1px solid #d0d0cc;border-radius:5px;">
+            ${positionOptions}
+          </select>
+          <span style="font-size:11px;color:#888;">Sort</span>
+          <input type="number" value="${dict.sort}" step="1" onchange="updateDictSort('${dict.id}', this.value)"
+            style="width:48px;font-size:12px;padding:5px 6px;border:1px solid #d0d0cc;border-radius:5px;">
+          <button title="Delete dictionary" onclick="removeDictionary('${dict.id}')"
+            style="font-size:12px;padding:4px 8px;border-color:#c0392b;color:#c0392b;margin-left:auto;">✕</button>
+        </div>
+      </div>`;
+  }).join('');
 
   // Default task size — one shared width/height applied to newly created
   // tasks regardless of subtype (User Task, Service Task, ...). Falls back
@@ -2194,29 +2363,23 @@ function renderSettingsDialogHtml() {
 
   const sectionLabel = 'font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.05em;margin:14px 0 6px;';
 
-  return `<div style="background:#fff;border-radius:10px;padding:20px;min-width:700px;max-width:860px;box-shadow:0 8px 32px rgba(0,0,0,0.18);">
-    <div style="display:flex;gap:32px;">
+  // The dialog sizes to its content but is capped at 80% of the viewport
+  // height (not a fixed size) — display:flex + max-height lets the box
+  // shrink-to-fit when there's little content, while still clamping (and
+  // handing scrolling to the columns below) once it doesn't fit.
+  return `<div style="background:#fff;border-radius:10px;padding:20px;min-width:700px;max-width:860px;max-height:80vh;box-shadow:0 8px 32px rgba(0,0,0,0.18);display:flex;flex-direction:column;">
+    <div style="display:flex;gap:32px;flex:1;min-height:0;">
 
-      <div style="flex:1;min-width:0;">
-        <div style="font-size:14px;font-weight:500;margin-bottom:2px;">Dictionaries</div>
-
-        <div style="${sectionLabel}">Systems</div>
-        <div id="dict-systems-list">${systemRows}</div>
-        <button onclick="addDictSystem()" style="font-size:12px;padding:5px 12px;margin-top:8px;">+ Add system</button>
-
-        <div style="${sectionLabel}">Locations</div>
-        <div id="dict-locations-list">${locationRows}</div>
-        <button onclick="addDictLocation()" style="font-size:12px;padding:5px 12px;margin-top:8px;">+ Add location</button>
+      <div style="flex:1;min-width:0;display:flex;flex-direction:column;min-height:0;">
+        <div style="font-size:14px;font-weight:500;margin-bottom:10px;flex-shrink:0;">Dictionaries</div>
+        <div id="dict-scroll-container" style="flex:1;min-height:0;overflow-y:auto;padding-right:10px;">
+          ${dictBlocksHtml || '<div style="padding:12px 0;font-size:12px;color:#aaa;">No dictionaries yet — add one below.</div>'}
+          <button onclick="addDictionary()" style="font-size:12px;padding:6px 14px;">+ Add dictionary</button>
+        </div>
       </div>
 
-      <div style="flex:1;min-width:0;border-left:1px solid #eee;padding-left:32px;">
-        <div style="font-size:14px;font-weight:500;margin-bottom:2px;">Dictionaries</div>
-
-        <div style="${sectionLabel}">Devices</div>
-        <div id="dict-devices-list">${deviceRows}</div>
-        <button onclick="addDictDevice()" style="font-size:12px;padding:5px 12px;margin-top:8px;">+ Add device</button>
-
-        <div style="font-size:14px;font-weight:500;margin:20px 0 2px;">General settings</div>
+      <div style="flex:1;min-width:0;border-left:1px solid #eee;padding-left:32px;overflow-y:auto;">
+        <div style="font-size:14px;font-weight:500;margin-bottom:2px;">General settings</div>
 
         <div style="${sectionLabel}">Default task size</div>
         <div style="font-size:11px;color:#aaa;margin-bottom:8px;">Applies to newly created tasks, regardless of type (User Task, Service Task, ...).</div>
@@ -2251,7 +2414,7 @@ function renderSettingsDialogHtml() {
 
     </div>
 
-    <div style="display:flex;justify-content:flex-end;margin-top:16px;">
+    <div style="display:flex;justify-content:flex-end;margin-top:16px;flex-shrink:0;">
       <button onclick="document.getElementById('settings-dialog').remove()"
         style="font-size:13px;padding:5px 14px;background:#1a6bb5;color:#fff;border-color:#1558a0;">Close</button>
     </div>
@@ -2259,8 +2422,15 @@ function renderSettingsDialogHtml() {
 }
 
 function refreshSettingsDialogList() {
-  const list = document.getElementById('dict-systems-list');
-  if (!list) return;
+  const dialog = document.getElementById('settings-dialog');
+  if (!dialog) return;
+  // Rebuilding the dialog's whole innerHTML also throws away the scroll
+  // position of the dictionaries list — without restoring it, adding a
+  // dictionary/item while scrolled down snaps the view back to the top,
+  // forcing a re-scroll after every single edit. Capture it beforehand and
+  // reapply it to the freshly-rendered container.
+  const scrollEl = document.getElementById('dict-scroll-container');
+  const savedScrollTop = scrollEl ? scrollEl.scrollTop : 0;
   // Deferred to the next tick: this is almost always called from an
   // onchange/onclick handler on an element that LIVES INSIDE the dialog
   // we're about to blow away (e.g. the input the user just typed into).
@@ -2270,15 +2440,65 @@ function refreshSettingsDialogList() {
   // this node" once the event finished bubbling. Pushing the re-render to
   // a fresh task lets the triggering event fully finish first.
   setTimeout(() => {
-    const dialog = document.getElementById('settings-dialog');
-    if (dialog) dialog.innerHTML = renderSettingsDialogHtml();
+    const dialog2 = document.getElementById('settings-dialog');
+    if (!dialog2) return;
+    dialog2.innerHTML = renderSettingsDialogHtml();
+    const scrollEl2 = document.getElementById('dict-scroll-container');
+    if (scrollEl2) scrollEl2.scrollTop = savedScrollTop;
   }, 0);
 }
 
-function addDictSystem() {
-  if (!dictionaries.systems) dictionaries.systems = [];
-  dictionaries.systems.push({
-    id: 'sys_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+function addDictionary() {
+  openPromptModal('New dictionary', 'Dictionary name', '', function(name) {
+    name = (name || '').trim();
+    if (!name) return;
+    if (!dictionaries.list) dictionaries.list = [];
+    const id = 'dict_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    dictionaries.list.push({ id, name, builtIn: false, metaKey: id, position: 'hide', sort: 1, items: [] });
+    onDictionariesChanged();
+    refreshSettingsDialogList();
+  });
+}
+
+function removeDictionary(dictId) {
+  const dict = findDictionary(dictId);
+  if (!dict) return;
+  openConfirmModal('Delete dictionary', `Delete "${dict.name || dict.id}" and all its items? This cannot be undone.`, function() {
+    dictionaries.list = (dictionaries.list || []).filter(d => d.id !== dictId);
+    onDictionariesChanged();
+    refreshSettingsDialogList();
+  });
+}
+
+function renameDictionary(dictId, newName) {
+  const dict = findDictionary(dictId);
+  if (!dict) return;
+  dict.name = newName;
+  onDictionariesChanged();
+}
+
+function updateDictPosition(dictId, position) {
+  const dict = findDictionary(dictId);
+  if (!dict || !DICT_POSITIONS.includes(position)) return;
+  dict.position = position;
+  onDictionariesChanged();
+}
+
+function updateDictSort(dictId, sortValue) {
+  const dict = findDictionary(dictId);
+  if (!dict) return;
+  let sort = parseInt(sortValue, 10);
+  if (!isFinite(sort)) sort = 1;
+  dict.sort = sort;
+  onDictionariesChanged();
+}
+
+function addDictItem(dictId) {
+  const dict = findDictionary(dictId);
+  if (!dict) return;
+  if (!dict.items) dict.items = [];
+  dict.items.push({
+    id: 'item_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     name: '',
     color: '#cce5ff'
   });
@@ -2286,63 +2506,17 @@ function addDictSystem() {
   refreshSettingsDialogList();
 }
 
-function updateDictSystemField(idx, field, value) {
-  if (!dictionaries.systems || !dictionaries.systems[idx]) return;
-  dictionaries.systems[idx][field] = value;
+function updateDictItemField(dictId, idx, field, value) {
+  const dict = findDictionary(dictId);
+  if (!dict || !dict.items || !dict.items[idx]) return;
+  dict.items[idx][field] = value;
   onDictionariesChanged();
 }
 
-function removeDictSystem(idx) {
-  if (!dictionaries.systems) return;
-  dictionaries.systems.splice(idx, 1);
-  onDictionariesChanged();
-  refreshSettingsDialogList();
-}
-
-function addDictDevice() {
-  if (!dictionaries.devices) dictionaries.devices = [];
-  dictionaries.devices.push({
-    id: 'dev_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-    name: '',
-    color: '#d4edda'
-  });
-  onDictionariesChanged();
-  refreshSettingsDialogList();
-}
-
-function updateDictDeviceField(idx, field, value) {
-  if (!dictionaries.devices || !dictionaries.devices[idx]) return;
-  dictionaries.devices[idx][field] = value;
-  onDictionariesChanged();
-}
-
-function removeDictDevice(idx) {
-  if (!dictionaries.devices) return;
-  dictionaries.devices.splice(idx, 1);
-  onDictionariesChanged();
-  refreshSettingsDialogList();
-}
-
-function addDictLocation() {
-  if (!dictionaries.locations) dictionaries.locations = [];
-  dictionaries.locations.push({
-    id: 'loc_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-    name: '',
-    color: '#e2d9f3'
-  });
-  onDictionariesChanged();
-  refreshSettingsDialogList();
-}
-
-function updateDictLocationField(idx, field, value) {
-  if (!dictionaries.locations || !dictionaries.locations[idx]) return;
-  dictionaries.locations[idx][field] = value;
-  onDictionariesChanged();
-}
-
-function removeDictLocation(idx) {
-  if (!dictionaries.locations) return;
-  dictionaries.locations.splice(idx, 1);
+function removeDictItem(dictId, idx) {
+  const dict = findDictionary(dictId);
+  if (!dict || !dict.items) return;
+  dict.items.splice(idx, 1);
   onDictionariesChanged();
   refreshSettingsDialogList();
 }
@@ -2438,29 +2612,13 @@ function applyElementSize(elementId) {
   refreshDetailOverlays();
 }
 
-function setElementSystem(elementId, systemId) {
+function setElementDictValue(elementId, dictId, valueId) {
+  const dict = findDictionary(dictId);
+  if (!dict) return;
   const er = modeler.get('elementRegistry');
   const el = er.get(elementId);
   if (!el) return;
-  setElementMeta(el.businessObject, 'system', systemId);
-  flushMetaToModel();
-  refreshDetailOverlays();
-}
-
-function setElementLocation(elementId, locationId) {
-  const er = modeler.get('elementRegistry');
-  const el = er.get(elementId);
-  if (!el) return;
-  setElementMeta(el.businessObject, 'location', locationId);
-  flushMetaToModel();
-  refreshDetailOverlays();
-}
-
-function setElementDevice(elementId, deviceId) {
-  const er = modeler.get('elementRegistry');
-  const el = er.get(elementId);
-  if (!el) return;
-  setElementMeta(el.businessObject, 'device', deviceId);
+  setElementMeta(el.businessObject, dict.metaKey, valueId);
   flushMetaToModel();
   refreshDetailOverlays();
 }
@@ -2711,20 +2869,12 @@ function renderBulkPropsPanel(panel, selection) {
   }
 
   if (metaEls.length > 0) {
-    html += buildBulkMetaSelect({
-      id: 'bulk-prop-system', label: 'System', count: metaEls.length,
-      items: dictionaries.systems || [], metaKey: 'system', metaEls,
-      onchange: 'applyBulkSystem(this.value)'
-    });
-    html += buildBulkMetaSelect({
-      id: 'bulk-prop-location', label: 'Location', count: metaEls.length,
-      items: dictionaries.locations || [], metaKey: 'location', metaEls,
-      onchange: 'applyBulkLocation(this.value)'
-    });
-    html += buildBulkMetaSelect({
-      id: 'bulk-prop-device', label: 'Device', count: metaEls.length,
-      items: dictionaries.devices || [], metaKey: 'device', metaEls,
-      onchange: 'applyBulkDevice(this.value)'
+    (dictionaries.list || []).forEach(dict => {
+      html += buildBulkMetaSelect({
+        id: 'bulk-prop-dict-' + dict.id, label: dict.name || dict.id, count: metaEls.length,
+        items: dict.items || [], metaKey: dict.metaKey, metaEls,
+        onchange: `applyBulkDictValue('${dict.id}', this.value)`
+      });
     });
 
     html += `<div class="prop-row" style="margin-top:10px;">
@@ -2858,37 +3008,17 @@ function clearBulkColor() {
 // on a bpmn-js command — so unlike Size/Color there's no native multi-
 // element call. Looping is fine functionally, but note it's N undo steps,
 // not one: Ctrl+Z after a bulk metadata edit reverts one element at a time.
-function applyBulkSystem(systemId) {
+function applyBulkDictValue(dictId, valueId) {
+  const dict = findDictionary(dictId);
+  if (!dict) return;
   const er = modeler.get('elementRegistry');
   bulkPropsTargets.meta.forEach(id => {
     const el = er.get(id);
-    if (el) setElementMeta(el.businessObject, 'system', systemId);
+    if (el) setElementMeta(el.businessObject, dict.metaKey, valueId);
   });
   flushMetaToModel();
   refreshDetailOverlays();
-  setStatus(`System applied to ${bulkPropsTargets.meta.length} elements`, 'ok');
-}
-
-function applyBulkLocation(locationId) {
-  const er = modeler.get('elementRegistry');
-  bulkPropsTargets.meta.forEach(id => {
-    const el = er.get(id);
-    if (el) setElementMeta(el.businessObject, 'location', locationId);
-  });
-  flushMetaToModel();
-  refreshDetailOverlays();
-  setStatus(`Location applied to ${bulkPropsTargets.meta.length} elements`, 'ok');
-}
-
-function applyBulkDevice(deviceId) {
-  const er = modeler.get('elementRegistry');
-  bulkPropsTargets.meta.forEach(id => {
-    const el = er.get(id);
-    if (el) setElementMeta(el.businessObject, 'device', deviceId);
-  });
-  flushMetaToModel();
-  refreshDetailOverlays();
-  setStatus(`Device applied to ${bulkPropsTargets.meta.length} elements`, 'ok');
+  setStatus(`${dict.name || dict.id} applied to ${bulkPropsTargets.meta.length} elements`, 'ok');
 }
 
 function applyBulkDescription() {
@@ -3012,41 +3142,21 @@ function updatePropsPanel(selection) {
     const detailsVal = getElementMeta(bo, 'details');
     const detailsUrl = detailsVal.trim();
 
-    const currentSystemId = getElementMeta(bo, 'system');
-    const systemOptions = (dictionaries.systems || []).map(s =>
-      `<option value="${escHtml(s.id)}" ${s.id === currentSystemId ? 'selected' : ''}>${escHtml(s.name || '(unnamed)')}</option>`
-    ).join('');
-    html += `<div class="prop-row" style="margin-top:10px;">
-      <div class="prop-name">System</div>
-      <select class="prop-input" id="prop-system-${safeId}" onchange="setElementSystem('${safeId}', this.value)">
-        <option value="">— none —</option>
-        ${systemOptions}
-      </select>
-    </div>`;
-
-    const currentLocationId = getElementMeta(bo, 'location');
-    const locationOptions = (dictionaries.locations || []).map(l =>
-      `<option value="${escHtml(l.id)}" ${l.id === currentLocationId ? 'selected' : ''}>${escHtml(l.name || '(unnamed)')}</option>`
-    ).join('');
-    html += `<div class="prop-row">
-      <div class="prop-name">Location</div>
-      <select class="prop-input" id="prop-location-${safeId}" onchange="setElementLocation('${safeId}', this.value)">
-        <option value="">— none —</option>
-        ${locationOptions}
-      </select>
-    </div>`;
-
-    const currentDeviceId = getElementMeta(bo, 'device');
-    const deviceOptions = (dictionaries.devices || []).map(d =>
-      `<option value="${escHtml(d.id)}" ${d.id === currentDeviceId ? 'selected' : ''}>${escHtml(d.name || '(unnamed)')}</option>`
-    ).join('');
-    html += `<div class="prop-row">
-      <div class="prop-name">Device</div>
-      <select class="prop-input" id="prop-device-${safeId}" onchange="setElementDevice('${safeId}', this.value)">
-        <option value="">— none —</option>
-        ${deviceOptions}
-      </select>
-    </div>`;
+    // One generic <select> per dictionary — the label is the dictionary's
+    // own (possibly renamed) name, kept in sync with Settings (point 6).
+    (dictionaries.list || []).forEach(dict => {
+      const currentValueId = getElementMeta(bo, dict.metaKey);
+      const dictOptions = (dict.items || []).map(it =>
+        `<option value="${escHtml(it.id)}" ${it.id === currentValueId ? 'selected' : ''}>${escHtml(it.name || '(unnamed)')}</option>`
+      ).join('');
+      html += `<div class="prop-row" style="margin-top:10px;">
+        <div class="prop-name">${escHtml(dict.name || dict.id)}</div>
+        <select class="prop-input" id="prop-dict-${dict.id}-${safeId}" onchange="setElementDictValue('${safeId}', '${dict.id}', this.value)">
+          <option value="">— none —</option>
+          ${dictOptions}
+        </select>
+      </div>`;
+    });
 
     html += `<div class="prop-row" style="margin-top:10px;">
       <div class="prop-name">Description</div>

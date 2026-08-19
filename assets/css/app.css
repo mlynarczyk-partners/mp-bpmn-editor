@@ -688,6 +688,25 @@
       pointer-events: none;
     }
 
+    /* Extended details — generic dictionary badge (Systems/Locations/Device/
+       any custom dictionary), positioned per-dictionary via renderDictBadgesForElement()
+       in app.js (point 4: Hide/Left Top/Right Top/Left Bottom/Right Bottom + sort).
+       Replaces the old fixed system/location/device-badge-overlay classes below,
+       which are kept only so any cached/older content referencing them still renders. */
+    .dict-badge-overlay {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 600;
+      line-height: 1.4;
+      white-space: normal;
+      word-break: break-word;
+      text-align: center;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+      pointer-events: none;
+    }
+
     /* Help dialog body (see openHelp() in app.js) */
     .help-content { font-size: 13px; line-height: 1.6; color: #333; }
     .help-content h3 {
