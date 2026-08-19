@@ -220,6 +220,57 @@ function navigateTo(rootEl, label) {
   updateTree();
 }
 
+// navStack normally gets built up by treeNavigateTo()/navigateTo() as you
+// deliberately drill in via OUR OWN navigation UI (the Process structure
+// tree, the "Enter subprocess" button). But bpmn-js ships its own built-in
+// drilldown affordance too — the small arrow overlay on a collapsed
+// sub-process shape — which calls canvas.setRootElement() directly, with no
+// way for us to intercept it and push onto navStack first. Left alone, that
+// left our custom breadcrumb bar rendering with an empty navStack (no "Back
+// to" button, no parent trail — just the current level's name floating
+// alone), while bpmn-js's OWN separate native breadcrumbs element rendered
+// its own (differently-styled, unhidden) trail on top of the canvas —
+// hence the two different-looking bars the same navigation could produce.
+//
+// Fix: whenever the plane actually changes, for ANY reason, rebuild
+// navStack from the model itself (same ancestor-walk findPathToSubprocess()
+// already does for tree navigation) rather than trusting whatever
+// push/pop bookkeeping the triggering code did or didn't do. Called from
+// the 'root.set' handler below, so it runs after every navigation — including
+// clicks on bpmn-js's own drilldown arrow.
+function rebuildNavStack() {
+  const currentRoot = getCurrentRoot();
+  if (!currentRoot) { navStack = []; return; }
+  const bo = currentRoot.businessObject;
+  if (!bo || bo.$type === 'bpmn:Process' || bo.$type === 'bpmn:Collaboration') {
+    navStack = [];
+    return;
+  }
+
+  const planes = modeler.get('canvas')._planes || [];
+  const mainProcessBo = getMainProcessBo();
+  const path = findPathToSubprocess(bo);
+  const oldStack = navStack;
+
+  navStack = path.map(ancestorBo => {
+    const rootEl = (ancestorBo === mainProcessBo)
+      ? findProcessRoot()
+      : (function() {
+          const plane = planes.find(p => p.rootElement && p.rootElement.businessObject === ancestorBo);
+          return plane ? plane.rootElement : null;
+        })();
+    // Reuse a remembered viewport for this level if we have one (e.g. from
+    // treeNavigateTo() having just captured it), so drilling in via the
+    // canvas arrow doesn't discard scroll/zoom state tracked elsewhere.
+    const existingEntry = oldStack.find(x => x.rootEl === rootEl);
+    return {
+      rootEl,
+      label: ancestorBo.name || ancestorBo.id || '?',
+      viewport: existingEntry ? existingEntry.viewport : null
+    };
+  }).filter(x => x.rootEl !== null);
+}
+
 function navigateToIndex(stackIndex) {
   let target;
   if (stackIndex < 0) {
@@ -232,19 +283,6 @@ function navigateToIndex(stackIndex) {
   modeler.get('canvas').setRootElement(target.rootEl);
   if (target.viewport) {
     modeler.get('canvas').viewbox(target.viewport);
-  } else {
-    fitViewport();
-  }
-  updateBreadcrumb();
-  updateTree();
-}
-
-function navigateUp() {
-  if (navStack.length === 0) return;
-  const prev = navStack.pop();
-  modeler.get('canvas').setRootElement(prev.rootEl);
-  if (prev.viewport) {
-    modeler.get('canvas').viewbox(prev.viewport);
   } else {
     fitViewport();
   }
@@ -280,17 +318,12 @@ function updateBreadcrumb() {
   }
 
   bc.classList.add('visible');
-  let html = '';
-
-  // "Back to parent" button
-  if (navStack.length > 0) {
-    const parentEntry = navStack[navStack.length - 1];
-    const parentType = parentEntry.rootEl && parentEntry.rootEl.businessObject && parentEntry.rootEl.businessObject.$type;
-    const parentLabel = (parentType === 'bpmn:Process' || parentType === 'bpmn:Collaboration')
-      ? getProcessDisplayName()
-      : parentEntry.label;
-    html += `<button class="bc-back-btn" onclick="navigateUp()">↑ Back to: ${escHtml(parentLabel)}</button>`;
-  }
+  // Static label, matching the Process structure panel's own header (just
+  // not upper-cased — this is a plain trail, not a section title). No
+  // "Back to: X" button: every ancestor name below is already clickable
+  // (navigateToIndex), so a dedicated back button was just a second,
+  // redundant way to do exactly what clicking the last ancestor already does.
+  let html = `<span class="bc-static-label">Process structure:</span>`;
 
   // Clickable path: every previous level
   navStack.forEach((item, i) => {
@@ -715,6 +748,18 @@ function initModeler() {
     palettePanel.appendChild(paletteEl);
   }
 
+  // Make actual move/resize snapping follow the "Small grid size" Settings
+  // value, instead of bpmn-js's own built-in GridSnapping service, which
+  // this bundle hardcodes to a fixed 10px (its snapValue()/getGridSpacing()
+  // literally have "10" baked in — there's no constructor/config option for
+  // it in this version, unlike the visual grid overlay above which is all
+  // our own code). We patch the live service's methods in place so snapping
+  // always matches whatever `smallGridSize` currently is, live — since the
+  // patched functions read the module-level `smallGridSize` variable at
+  // call time (not at patch time), changing it in Settings takes effect on
+  // the very next drag with no need to re-patch.
+  patchGridSnappingSpacing();
+
   // Allow resizing Tasks — override the built-in rule. The "rules" service
   // itself has no addRule() in this bundle (that lives on BpmnRules, which
   // isn't exposed under its own DI key here), so we hook the eventBus
@@ -722,10 +767,20 @@ function initModeler() {
   // "commandStack.<action>.canExecute". Priority higher than bpmn-js's
   // default means ours is checked first; returning `undefined` for anything
   // else leaves bpmn-js's own rule to decide, so existing resizable elements
-  // (sub-processes, pools, lanes, ...) are unaffected.
+  // (pools, lanes, expanded sub-processes, ...) are unaffected.
   modeler.get('eventBus').on('commandStack.shape.resize.canExecute', 2000, function(event) {
     const shape = event.context && event.context.shape;
     if (shape && RESIZABLE_TASK_TYPES.includes(shape.type)) {
+      return true;
+    }
+    // A COLLAPSED sub-process renders as a small fixed box, visually and
+    // behaviorally like a Task — but bpmn-js's built-in rule only allows
+    // resizing sub-processes when *expanded* (acting as a container), so
+    // collapsed ones were stuck at their default size. An EXPANDED
+    // sub-process is left to fall through to the built-in rule (`undefined`)
+    // since that rule also guards against shrinking below the bounding box
+    // of its visible children — a check we'd otherwise have to reimplement.
+    if (shape && shape.type === 'bpmn:SubProcess' && shape.collapsed) {
       return true;
     }
     return undefined;
@@ -905,8 +960,14 @@ function initModeler() {
     scheduleAutosave();
   });
 
-  // Handle drill-down via a click on bpmn-js's arrow
+  // Handle drill-down via a click on bpmn-js's own arrow overlay — this is
+  // the ONE handler that fires for every plane change regardless of how it
+  // was triggered (Process structure tree, canvas breadcrumb "Back", or
+  // bpmn-js's own drilldown arrow), so navStack is rebuilt from the model
+  // here rather than trusted from whatever the triggering code did (see
+  // rebuildNavStack() for why).
   modeler.on('root.set', () => {
+    rebuildNavStack();
     updateBreadcrumb();
     updateTree();
     refreshDetailOverlays();
@@ -1330,11 +1391,42 @@ function measureBadgeHeight(className, text, maxWidthPx) {
   return height;
 }
 
+// Same probe trick as measureBadgeHeight(), but for width — used by the
+// Device badge (bottom-right corner) to know how far to shift its "right"
+// offset so the badge's own right edge lands exactly on the element's right
+// edge and it grows LEFTWARD as the label gets longer, mirroring how the
+// System badge (bottom-left) grows rightward and the Location badge
+// (top-left) grows upward. See the "right" positioning note on
+// DETAIL_OVERLAY_SIZE above — diagram-js's overlay "right" is a left-shift
+// by that many px from the element's right edge, not a real CSS "right".
+function measureBadgeWidth(className, text, maxWidthPx) {
+  const probe = document.createElement('span');
+  probe.className = className;
+  probe.style.position = 'fixed';
+  probe.style.visibility = 'hidden';
+  probe.style.left = '-9999px';
+  probe.style.top = '0';
+  probe.style.maxWidth = maxWidthPx + 'px';
+  probe.style.width = 'max-content';
+  probe.textContent = text;
+  document.body.appendChild(probe);
+  const width = probe.getBoundingClientRect().width;
+  document.body.removeChild(probe);
+  return width;
+}
+
 // Element types without their own Description/Details/System fields — same
-// list as in updatePropsPanel, so overlays only ever appear where these
-// fields can actually be set.
+// list used by updatePropsPanel (single- and multi-select) and the
+// overlay-rendering code, so overlays only ever appear where these fields
+// can actually be set.
 const DETAIL_FIELDS_EXCLUDED_TYPES = ['bpmn:SequenceFlow', 'bpmn:MessageFlow', 'bpmn:Association',
   'bpmn:DataInputAssociation', 'bpmn:DataOutputAssociation'];
+
+// Element types without a fill-color field (pool/lane headers aren't filled
+// via the color picker; connections have no fill). Shared by the
+// single-select and multi-select Properties panels.
+const NO_COLOR_TYPES = ['bpmn:SequenceFlow', 'bpmn:MessageFlow', 'bpmn:Association',
+  'bpmn:DataInputAssociation', 'bpmn:DataOutputAssociation', 'bpmn:Lane', 'bpmn:Participant'];
 
 let extendedDetailsEnabled = false;
 try { extendedDetailsEnabled = localStorage.getItem('bpmnEditor.extendedDetails') === '1'; } catch(e) {}
@@ -1353,7 +1445,7 @@ function updateExtendedDetailsButton() {
   btn.textContent = 'Extended';
   btn.classList.toggle('primary', extendedDetailsEnabled);
   btn.title = extendedDetailsEnabled
-    ? 'Extended details are on — elements with a URL show a link icon, elements with a System show a badge'
+    ? 'Extended details are on — elements with a URL show a link icon, elements with a System/Location/Device show a badge'
     : 'Extended details are off';
 }
 
@@ -1442,6 +1534,29 @@ function refreshDetailOverlays() {
         // element may not have its own graphical representation — skip
       }
     }
+
+    const deviceId = (getElementMeta(bo, 'device') || '').trim();
+    const device = deviceId ? getDeviceById(deviceId) : null;
+    if (device) {
+      try {
+        const textColor = contrastTextColor(device.color);
+        const labelText = device.name || '?';
+        // Below the element, right side (mirror of the System badge, which
+        // sits below on the left) — grows LEFTWARD as it wraps/widens, so
+        // unlike System (which just needs left:0) we measure the rendered
+        // width first and use it as the "right" offset to keep the badge's
+        // own right edge pinned to the element's right edge.
+        const badgeWidth = measureBadgeWidth('device-badge-overlay', labelText, maxWidthPx);
+        const overlayId = overlays.add(el, 'device-badge', {
+          position: { right: badgeWidth, bottom: -SYSTEM_BADGE_GAP },
+          html: `<span class="device-badge-overlay" style="background:${escHtml(device.color)}; color:${textColor}; max-width:${maxWidthPx}px; width:max-content;"
+            title="Device: ${escHtml(device.name || '')}">${escHtml(labelText)}</span>`
+        });
+        detailOverlayIds.push(overlayId);
+      } catch(e) {
+        // element may not have its own graphical representation — skip
+      }
+    }
   });
 }
 
@@ -1452,24 +1567,111 @@ function refreshDetailOverlays() {
    0 = off, 10 = light-blue button + 10px grid, 50 = blue button + 50px grid.
    Whichever spacing is active, lines every 100px are drawn a bit darker so
    there's always a visible "every 100" reference regardless of 10 vs 50. */
-const GRID_SIZES = [0, 10, 50];
 const GRID_MAJOR_SPACING = 100;
-const GRID_MINOR_COLOR = '#e3e3df';
-const GRID_MAJOR_COLOR = '#c9c9c3';
+const GRID_MEDIUM_SIZE = 50;
 // Half-extent (in diagram units) of the grid rect around the origin — large
 // enough that panning around a normal diagram never runs past its edge.
 const GRID_HALF_EXTENT = 20000;
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
+// "Small" grid size (# button's first non-off state) — user-configurable
+// in Settings → General settings (default 10px, e.g. 20px per a request to
+// support that). Restricted to values that evenly divide GRID_MAJOR_SPACING
+// (100) — makeMinorGridPattern() builds one repeating tile sized to the
+// major spacing containing every interior small-grid line, which only tiles
+// seamlessly (no uneven gap at each 100px boundary) when 100 is a whole
+// multiple of the small size. GRID_MEDIUM_SIZE (50) is excluded from the
+// choices too, so the two non-off grid states can never collide.
+const DEFAULT_SMALL_GRID_SIZE = 10;
+const SMALL_GRID_SIZE_STORAGE_KEY = 'bpmnEditor.smallGridSize';
+const VALID_SMALL_GRID_SIZES = Array.from({ length: GRID_MAJOR_SPACING - 1 }, (_, i) => i + 1)
+  .filter(n => GRID_MAJOR_SPACING % n === 0 && n !== GRID_MEDIUM_SIZE);
+
+function snapToValidSmallGridSize(v) {
+  if (!Number.isFinite(v) || v < 1) return DEFAULT_SMALL_GRID_SIZE;
+  if (VALID_SMALL_GRID_SIZES.includes(v)) return v;
+  return VALID_SMALL_GRID_SIZES.reduce((best, n) =>
+    Math.abs(n - v) < Math.abs(best - v) ? n : best, VALID_SMALL_GRID_SIZES[0]);
+}
+
+function loadSmallGridSize() {
+  try {
+    const v = parseInt(localStorage.getItem(SMALL_GRID_SIZE_STORAGE_KEY), 10);
+    if (Number.isFinite(v)) return snapToValidSmallGridSize(v);
+  } catch (e) {}
+  return DEFAULT_SMALL_GRID_SIZE;
+}
+let smallGridSize = loadSmallGridSize();
+
+function getGridSizes() {
+  return [0, smallGridSize, GRID_MEDIUM_SIZE];
+}
+
+// Changing the small grid size while that state is the one currently
+// showing updates the live grid immediately (rather than requiring an
+// extra click of the # button to "pick up" the new number).
+function updateSmallGridSize(rawValue) {
+  const wasActive = gridSize === smallGridSize;
+  smallGridSize = snapToValidSmallGridSize(Math.round(parseFloat(rawValue)));
+  try { localStorage.setItem(SMALL_GRID_SIZE_STORAGE_KEY, String(smallGridSize)); } catch (e) {}
+  if (wasActive) {
+    gridSize = smallGridSize;
+    try { localStorage.setItem('bpmnEditor.gridSize', String(gridSize)); } catch (e) {}
+  }
+  updateGridButton();
+  renderGridBackground();
+  refreshSettingsDialogList();
+}
+
+function resetSmallGridSize() {
+  updateSmallGridSize(DEFAULT_SMALL_GRID_SIZE);
+}
+
+// Canvas background + grid line colors — a per-computer editor preference
+// (Settings → General settings), not part of a diagram's own data, so this
+// is stored separately from `dictionaries` (which travels WITH a .bpmn file
+// via flushDictionariesToModel()) and never embedded into the XML.
+const DEFAULT_APP_COLORS = { canvasBg: '#ffffff', gridMajor: '#c9c9c3', gridMinor: '#e3e3df' };
+const APP_COLORS_STORAGE_KEY = 'bpmnEditor.appColors';
+
+function loadAppColors() {
+  try {
+    const raw = localStorage.getItem(APP_COLORS_STORAGE_KEY);
+    if (raw) return Object.assign({}, DEFAULT_APP_COLORS, JSON.parse(raw));
+  } catch (e) {}
+  return Object.assign({}, DEFAULT_APP_COLORS);
+}
+function saveAppColors() {
+  try { localStorage.setItem(APP_COLORS_STORAGE_KEY, JSON.stringify(appColors)); } catch (e) {}
+}
+let appColors = loadAppColors();
+
+function updateAppColor(key, value) {
+  if (!(key in DEFAULT_APP_COLORS)) return;
+  appColors[key] = value;
+  saveAppColors();
+  renderGridBackground();
+  refreshSettingsDialogList();
+}
+
+function resetAppColor(key) {
+  if (!(key in DEFAULT_APP_COLORS)) return;
+  appColors[key] = DEFAULT_APP_COLORS[key];
+  saveAppColors();
+  renderGridBackground();
+  refreshSettingsDialogList();
+}
+
 let gridSize = 0;
 try {
   const stored = parseInt(localStorage.getItem('bpmnEditor.gridSize'), 10);
-  if (GRID_SIZES.includes(stored)) gridSize = stored;
+  if (getGridSizes().includes(stored)) gridSize = stored;
 } catch (e) {}
 
 function toggleGrid() {
-  const idx = GRID_SIZES.indexOf(gridSize);
-  gridSize = GRID_SIZES[(idx + 1) % GRID_SIZES.length];
+  const sizes = getGridSizes();
+  const idx = sizes.indexOf(gridSize);
+  gridSize = sizes[(idx + 1) % sizes.length];
   try { localStorage.setItem('bpmnEditor.gridSize', String(gridSize)); } catch (e) {}
   updateGridButton();
   renderGridBackground();
@@ -1482,16 +1684,18 @@ function updateGridButton() {
   if (gridSize === 0) {
     btn.classList.add('grid-off');
     btn.title = 'Grid: off';
-  } else if (gridSize === 10) {
+  } else if (gridSize === smallGridSize) {
     btn.classList.add('grid-10');
-    btn.title = 'Grid: 10px';
+    btn.title = `Grid: ${smallGridSize}px`;
   } else {
     btn.classList.add('primary');
-    btn.title = 'Grid: 50px';
+    btn.title = `Grid: ${GRID_MEDIUM_SIZE}px`;
   }
 }
 
-function makeGridPattern(id, spacing, color) {
+// Major grid (the fixed "every 100px" reference lines) — one dashed line
+// per tile edge, tile size = spacing, so it repeats cleanly on its own.
+function makeMajorGridPattern(id, spacing, color) {
   const pattern = document.createElementNS(SVG_NS, 'pattern');
   pattern.setAttribute('id', id);
   pattern.setAttribute('patternUnits', 'userSpaceOnUse');
@@ -1503,6 +1707,7 @@ function makeGridPattern(id, spacing, color) {
   lineH.setAttribute('x2', spacing); lineH.setAttribute('y2', 0);
   lineH.setAttribute('stroke', color);
   lineH.setAttribute('stroke-width', 1);
+  lineH.setAttribute('vector-effect', 'non-scaling-stroke');
   lineH.setAttribute('stroke-dasharray', '2,2');
 
   const lineV = document.createElementNS(SVG_NS, 'line');
@@ -1510,11 +1715,111 @@ function makeGridPattern(id, spacing, color) {
   lineV.setAttribute('x2', 0); lineV.setAttribute('y2', spacing);
   lineV.setAttribute('stroke', color);
   lineV.setAttribute('stroke-width', 1);
+  lineV.setAttribute('vector-effect', 'non-scaling-stroke');
   lineV.setAttribute('stroke-dasharray', '2,2');
 
   pattern.appendChild(lineH);
   pattern.appendChild(lineV);
   return pattern;
+}
+
+// Minor grid (10px or 50px, whichever is active). Previously this used the
+// same one-line-per-tile approach as the major pattern, at tile size =
+// spacing — which meant that at every position that's ALSO a multiple of
+// the major spacing (every 10th minor line at 10px, every 2nd at 50px),
+// two separate lines from two independently-tiled patterns landed on the
+// exact same coordinate. Both patterns tile from the same origin so they're
+// logically aligned, but as two unrelated SVG layers the renderer was free
+// to snap each to a device pixel independently — on a HiDPI screen that
+// occasionally rounded them a device-pixel apart, reading as a blurry
+// "double line" right where the grids should have coincided cleanly.
+//
+// Fixed by building ONE tile sized to the MAJOR spacing that explicitly
+// omits the position(s) coinciding with a major line (0 and, by extension,
+// every multiple of `spacing` up to but excluding `majorSpacing`) — so
+// there is only ever one line drawn per coordinate, period, and the major
+// pattern (drawn on top, see renderGridBackground()) owns those positions
+// outright. (A dotted variant of this line was tried and reverted — dashed
+// reads better here.)
+//
+// Both this and the major pattern's lines carry vector-effect:
+// non-scaling-stroke, so a "1" stroke-width always renders as exactly one
+// physical pixel regardless of canvas zoom — without it, zooming in made
+// the (much more frequent) minor lines visually balloon in thickness right
+// along with everything else on the canvas, reading as "bolder" than the
+// major grid even though both share the same numeric stroke-width. Only
+// the dash LENGTH still scales with zoom (that's not "thickness" — it's
+// expected for a diagram-space ruler); the line's own weight now stays
+// fixed, so the two grids only ever differ by color, as intended.
+function makeMinorGridPattern(id, spacing, majorSpacing, color) {
+  const pattern = document.createElementNS(SVG_NS, 'pattern');
+  pattern.setAttribute('id', id);
+  pattern.setAttribute('patternUnits', 'userSpaceOnUse');
+  pattern.setAttribute('width', majorSpacing);
+  pattern.setAttribute('height', majorSpacing);
+
+  for (let pos = spacing; pos < majorSpacing; pos += spacing) {
+    const lineV = document.createElementNS(SVG_NS, 'line');
+    lineV.setAttribute('x1', pos); lineV.setAttribute('y1', 0);
+    lineV.setAttribute('x2', pos); lineV.setAttribute('y2', majorSpacing);
+    lineV.setAttribute('stroke', color);
+    lineV.setAttribute('stroke-width', 1);
+    lineV.setAttribute('vector-effect', 'non-scaling-stroke');
+    lineV.setAttribute('stroke-dasharray', '2,2');
+    pattern.appendChild(lineV);
+
+    const lineH = document.createElementNS(SVG_NS, 'line');
+    lineH.setAttribute('x1', 0); lineH.setAttribute('y1', pos);
+    lineH.setAttribute('x2', majorSpacing); lineH.setAttribute('y2', pos);
+    lineH.setAttribute('stroke', color);
+    lineH.setAttribute('stroke-width', 1);
+    lineH.setAttribute('vector-effect', 'non-scaling-stroke');
+    lineH.setAttribute('stroke-dasharray', '2,2');
+    pattern.appendChild(lineH);
+  }
+  return pattern;
+}
+
+// Same rounding diagram-js's own (minified, hardcoded-to-10) GridSnapping
+// service uses internally — reimplemented here since that helper isn't
+// exposed outside the bundle's own closure.
+function quantizeToGrid(value, spacing, roundFn) {
+  const fn = roundFn || 'round';
+  return Math[fn](value / spacing) * spacing;
+}
+
+// Monkey-patches bpmn-js's built-in GridSnapping service so that every
+// move/resize/connect snap follows `smallGridSize` (the Settings "Small
+// grid size" value) instead of the library's hardcoded 10px. Only patches
+// once per modeler instance (_mpPatched guard) — safe to call again on
+// every initModeler() without double-wrapping.
+function patchGridSnappingSpacing() {
+  if (!modeler) return;
+  let gridSnapping;
+  try { gridSnapping = modeler.get('gridSnapping'); } catch (e) { return; }
+  if (!gridSnapping || gridSnapping._mpPatched) return;
+  gridSnapping._mpPatched = true;
+
+  gridSnapping.getGridSpacing = function() { return smallGridSize; };
+
+  // Mirrors the original snapValue()'s own logic (including its quirk of
+  // treating an explicit 0 for min/max as "not set", via a truthy check
+  // rather than a null check) — only the hardcoded "10" becomes dynamic.
+  gridSnapping.snapValue = function(value, opts) {
+    let offset = 0;
+    if (opts && opts.offset) offset = opts.offset;
+    const spacing = smallGridSize;
+    let result = quantizeToGrid(value + offset, spacing);
+    if (opts && opts.min) {
+      const min = quantizeToGrid(opts.min + offset, spacing, 'ceil');
+      result = Math.max(result, min);
+    }
+    if (opts && opts.max) {
+      const max = quantizeToGrid(opts.max + offset, spacing, 'floor');
+      result = Math.min(result, max);
+    }
+    return result - offset;
+  };
 }
 
 // Rebuilds the grid layer from scratch — cheap enough (a handful of DOM
@@ -1524,6 +1829,13 @@ function renderGridBackground() {
   let svg;
   try { svg = modeler.get('canvas')._svg; } catch (e) { return; }
   if (!svg) return;
+
+  // Canvas background is a plain element style, not an SVG layer — applied
+  // here too since this function already runs at every point the canvas
+  // exists or might need refreshing (init, new diagram, import, plane
+  // change, and now also a Settings color change).
+  const canvasEl = document.getElementById('canvas');
+  if (canvasEl) canvasEl.style.background = appColors.canvasBg;
 
   const oldLayer = svg.querySelector('#app-grid-layer');
   if (oldLayer) oldLayer.remove();
@@ -1537,8 +1849,8 @@ function renderGridBackground() {
 
   const defs = document.createElementNS(SVG_NS, 'defs');
   defs.setAttribute('id', 'app-grid-defs');
-  defs.appendChild(makeGridPattern('app-grid-minor', gridSize, GRID_MINOR_COLOR));
-  defs.appendChild(makeGridPattern('app-grid-major', GRID_MAJOR_SPACING, GRID_MAJOR_COLOR));
+  defs.appendChild(makeMinorGridPattern('app-grid-minor', gridSize, GRID_MAJOR_SPACING, appColors.gridMinor));
+  defs.appendChild(makeMajorGridPattern('app-grid-major', GRID_MAJOR_SPACING, appColors.gridMajor));
   svg.insertBefore(defs, svg.firstChild);
 
   const layer = document.createElementNS(SVG_NS, 'g');
@@ -1576,10 +1888,11 @@ function loadDictionaries() {
       const parsed = JSON.parse(raw);
       if (!parsed.systems) parsed.systems = [];
       if (!parsed.locations) parsed.locations = [];
+      if (!parsed.devices) parsed.devices = [];
       return parsed;
     }
   } catch (e) {}
-  return { systems: [], locations: [] };
+  return { systems: [], locations: [], devices: [] };
 }
 
 function saveDictionaries() {
@@ -1594,6 +1907,10 @@ function getSystemById(id) {
 
 function getLocationById(id) {
   return (dictionaries.locations || []).find(l => l.id === id) || null;
+}
+
+function getDeviceById(id) {
+  return (dictionaries.devices || []).find(d => d.id === id) || null;
 }
 
 // Called after any add/edit/remove — persists to localStorage (per-computer
@@ -1668,8 +1985,8 @@ function loadDictionariesFromModel() {
 // (not yet saved into any file) are kept rather than dropped.
 function mergeDictionaries(local, incoming) {
   if (!incoming) return local;
-  const merged = { systems: [...(local.systems || [])], locations: [...(local.locations || [])] };
-  ['systems', 'locations'].forEach(cat => {
+  const merged = { systems: [...(local.systems || [])], locations: [...(local.locations || [])], devices: [...(local.devices || [])] };
+  ['systems', 'locations', 'devices'].forEach(cat => {
     (incoming[cat] || []).forEach(item => {
       const idx = merged[cat].findIndex(x => x.id === item.id);
       if (idx >= 0) merged[cat][idx] = item;
@@ -1707,6 +2024,22 @@ function renderDictRows(items, listId, updateFn, removeFn) {
   ).join('');
 }
 
+// One row for an app-preference color (canvas background, grid lines) —
+// same swatch-on-the-left look as renderDictRows(), but there's no name to
+// edit and no entry to remove, just a fixed label and a "Reset" that only
+// appears once the value actually differs from the built-in default.
+function renderAppColorRow(label, key) {
+  const value = appColors[key] || DEFAULT_APP_COLORS[key];
+  const isCustom = value.toLowerCase() !== DEFAULT_APP_COLORS[key].toLowerCase();
+  return `
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #f0f0ec;">
+      <input type="color" value="${value}" onchange="updateAppColor('${key}', this.value)"
+        style="width:32px;height:28px;border:1px solid #d0d0cc;border-radius:5px;padding:1px;cursor:pointer;">
+      <div style="flex:1;font-size:13px;">${escHtml(label)}</div>
+      ${isCustom ? `<button title="Reset to default" onclick="resetAppColor('${key}')" style="font-size:11px;padding:4px 8px;">Reset</button>` : ''}
+    </div>`;
+}
+
 function renderSettingsDialogHtml() {
   const systems = dictionaries.systems || [];
   const systemRows = renderDictRows(systems, 'dict-systems-list', 'updateDictSystemField', 'removeDictSystem')
@@ -1716,35 +2049,73 @@ function renderSettingsDialogHtml() {
   const locationRows = renderDictRows(locations, 'dict-locations-list', 'updateDictLocationField', 'removeDictLocation')
     || '<div style="padding:12px 0;font-size:12px;color:#aaa;">No locations yet — add one below.</div>';
 
+  const devices = dictionaries.devices || [];
+  const deviceRows = renderDictRows(devices, 'dict-devices-list', 'updateDictDeviceField', 'removeDictDevice')
+    || '<div style="padding:12px 0;font-size:12px;color:#aaa;">No devices yet — add one below.</div>';
+
   // Default task size — one shared width/height applied to newly created
   // tasks regardless of subtype (User Task, Service Task, ...). Falls back
   // to bpmn-js's own built-in default (100×80) when unset.
   const taskDefaultSize = dictionaries.taskDefaultSize || BPMN_DEFAULT_TASK_SIZE;
   const isCustomTaskSize = !!dictionaries.taskDefaultSize;
 
-  return `<div style="background:#fff;border-radius:10px;padding:20px;min-width:380px;max-width:480px;box-shadow:0 8px 32px rgba(0,0,0,0.18);">
-    <div style="font-size:14px;font-weight:500;margin-bottom:2px;">Settings — Dictionaries</div>
+  const sectionLabel = 'font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.05em;margin:14px 0 6px;';
 
-    <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.05em;margin:14px 0 6px;">Systems</div>
-    <div id="dict-systems-list">${systemRows}</div>
-    <button onclick="addDictSystem()" style="font-size:12px;padding:5px 12px;margin-top:8px;">+ Add system</button>
+  return `<div style="background:#fff;border-radius:10px;padding:20px;min-width:700px;max-width:860px;box-shadow:0 8px 32px rgba(0,0,0,0.18);">
+    <div style="display:flex;gap:32px;">
 
-    <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.05em;margin:18px 0 6px;">Locations</div>
-    <div id="dict-locations-list">${locationRows}</div>
-    <button onclick="addDictLocation()" style="font-size:12px;padding:5px 12px;margin-top:8px;">+ Add location</button>
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:14px;font-weight:500;margin-bottom:2px;">Dictionaries</div>
 
-    <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.05em;margin:18px 0 6px;">Default task size</div>
-    <div style="font-size:11px;color:#aaa;margin-bottom:8px;">Applies to newly created tasks, regardless of type (User Task, Service Task, ...).</div>
-    <div style="display:flex;align-items:center;gap:6px;">
-      <input type="number" id="dict-task-default-width" min="${MIN_SHAPE_SIZE}" step="1" value="${taskDefaultSize.width}"
-        onchange="updateTaskDefaultSize()"
-        style="width:64px;font-size:13px;padding:5px 8px;border:1px solid #d0d0cc;border-radius:5px;">
-      <span style="color:#999;">×</span>
-      <input type="number" id="dict-task-default-height" min="${MIN_SHAPE_SIZE}" step="1" value="${taskDefaultSize.height}"
-        onchange="updateTaskDefaultSize()"
-        style="width:64px;font-size:13px;padding:5px 8px;border:1px solid #d0d0cc;border-radius:5px;">
-      <span style="color:#999;font-size:11px;">px</span>
-      ${isCustomTaskSize ? `<button onclick="resetTaskDefaultSize()" style="font-size:11px;padding:4px 8px;margin-left:auto;">Reset to ${BPMN_DEFAULT_TASK_SIZE.width}×${BPMN_DEFAULT_TASK_SIZE.height}</button>` : ''}
+        <div style="${sectionLabel}">Systems</div>
+        <div id="dict-systems-list">${systemRows}</div>
+        <button onclick="addDictSystem()" style="font-size:12px;padding:5px 12px;margin-top:8px;">+ Add system</button>
+
+        <div style="${sectionLabel}">Locations</div>
+        <div id="dict-locations-list">${locationRows}</div>
+        <button onclick="addDictLocation()" style="font-size:12px;padding:5px 12px;margin-top:8px;">+ Add location</button>
+      </div>
+
+      <div style="flex:1;min-width:0;border-left:1px solid #eee;padding-left:32px;">
+        <div style="font-size:14px;font-weight:500;margin-bottom:2px;">Dictionaries</div>
+
+        <div style="${sectionLabel}">Devices</div>
+        <div id="dict-devices-list">${deviceRows}</div>
+        <button onclick="addDictDevice()" style="font-size:12px;padding:5px 12px;margin-top:8px;">+ Add device</button>
+
+        <div style="font-size:14px;font-weight:500;margin:20px 0 2px;">General settings</div>
+
+        <div style="${sectionLabel}">Default task size</div>
+        <div style="font-size:11px;color:#aaa;margin-bottom:8px;">Applies to newly created tasks, regardless of type (User Task, Service Task, ...).</div>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <input type="number" id="dict-task-default-width" min="${MIN_SHAPE_SIZE}" step="1" value="${taskDefaultSize.width}"
+            onchange="updateTaskDefaultSize()"
+            style="width:64px;font-size:13px;padding:5px 8px;border:1px solid #d0d0cc;border-radius:5px;">
+          <span style="color:#999;">×</span>
+          <input type="number" id="dict-task-default-height" min="${MIN_SHAPE_SIZE}" step="1" value="${taskDefaultSize.height}"
+            onchange="updateTaskDefaultSize()"
+            style="width:64px;font-size:13px;padding:5px 8px;border:1px solid #d0d0cc;border-radius:5px;">
+          <span style="color:#999;font-size:11px;">px</span>
+          ${isCustomTaskSize ? `<button onclick="resetTaskDefaultSize()" style="font-size:11px;padding:4px 8px;margin-left:auto;">Reset to ${BPMN_DEFAULT_TASK_SIZE.width}×${BPMN_DEFAULT_TASK_SIZE.height}</button>` : ''}
+        </div>
+
+        <div style="${sectionLabel}">Canvas &amp; grid</div>
+        <div style="display:flex;align-items:center;gap:6px;padding:6px 0;border-bottom:1px solid #f0f0ec;">
+          <div style="flex:1;font-size:13px;">Small grid size</div>
+          <input type="number" id="small-grid-size-input" min="1" max="${GRID_MAJOR_SPACING - 1}" step="1" value="${smallGridSize}"
+            onchange="updateSmallGridSize(this.value)"
+            style="width:64px;font-size:13px;padding:5px 8px;border:1px solid #d0d0cc;border-radius:5px;">
+          <span style="color:#999;font-size:11px;">px</span>
+          ${smallGridSize !== DEFAULT_SMALL_GRID_SIZE ? `<button title="Reset to default" onclick="resetSmallGridSize()" style="font-size:11px;padding:4px 8px;">Reset</button>` : ''}
+        </div>
+        <div style="font-size:11px;color:#aaa;margin:4px 0 8px;">Must divide evenly into 100 (the fixed reference grid) — an invalid number snaps to the nearest one that does.</div>
+        <div id="app-colors-list">
+          ${renderAppColorRow('Canvas background', 'canvasBg')}
+          ${renderAppColorRow('Grid lines — every 100px', 'gridMajor')}
+          ${renderAppColorRow(`Grid lines — every ${smallGridSize}px`, 'gridMinor')}
+        </div>
+      </div>
+
     </div>
 
     <div style="display:flex;justify-content:flex-end;margin-top:16px;">
@@ -1757,9 +2128,18 @@ function renderSettingsDialogHtml() {
 function refreshSettingsDialogList() {
   const list = document.getElementById('dict-systems-list');
   if (!list) return;
-  // Re-render just the list markup (via the full template minus the outer box)
-  const dialog = document.getElementById('settings-dialog');
-  if (dialog) dialog.innerHTML = renderSettingsDialogHtml();
+  // Deferred to the next tick: this is almost always called from an
+  // onchange/onclick handler on an element that LIVES INSIDE the dialog
+  // we're about to blow away (e.g. the input the user just typed into).
+  // Replacing dialog.innerHTML synchronously, while the browser is still
+  // in the middle of dispatching that very element's own event, made it
+  // throw "NotFoundError: the node to be removed is no longer a child of
+  // this node" once the event finished bubbling. Pushing the re-render to
+  // a fresh task lets the triggering event fully finish first.
+  setTimeout(() => {
+    const dialog = document.getElementById('settings-dialog');
+    if (dialog) dialog.innerHTML = renderSettingsDialogHtml();
+  }, 0);
 }
 
 function addDictSystem() {
@@ -1782,6 +2162,30 @@ function updateDictSystemField(idx, field, value) {
 function removeDictSystem(idx) {
   if (!dictionaries.systems) return;
   dictionaries.systems.splice(idx, 1);
+  onDictionariesChanged();
+  refreshSettingsDialogList();
+}
+
+function addDictDevice() {
+  if (!dictionaries.devices) dictionaries.devices = [];
+  dictionaries.devices.push({
+    id: 'dev_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    name: '',
+    color: '#d4edda'
+  });
+  onDictionariesChanged();
+  refreshSettingsDialogList();
+}
+
+function updateDictDeviceField(idx, field, value) {
+  if (!dictionaries.devices || !dictionaries.devices[idx]) return;
+  dictionaries.devices[idx][field] = value;
+  onDictionariesChanged();
+}
+
+function removeDictDevice(idx) {
+  if (!dictionaries.devices) return;
+  dictionaries.devices.splice(idx, 1);
   onDictionariesChanged();
   refreshSettingsDialogList();
 }
@@ -1915,6 +2319,15 @@ function setElementLocation(elementId, locationId) {
   const el = er.get(elementId);
   if (!el) return;
   setElementMeta(el.businessObject, 'location', locationId);
+  flushMetaToModel();
+  refreshDetailOverlays();
+}
+
+function setElementDevice(elementId, deviceId) {
+  const er = modeler.get('elementRegistry');
+  const el = er.get(elementId);
+  if (!el) return;
+  setElementMeta(el.businessObject, 'device', deviceId);
   flushMetaToModel();
   refreshDetailOverlays();
 }
@@ -2080,11 +2493,305 @@ function togglePropsPanelCollapsed() {
   updatePropsPanel(modeler.get('selection').get());
 }
 
+// Element ids the bulk panel's buttons currently act on, split by what kind
+// of edit they support (a shift-selected group is usually a mix of types —
+// e.g. some Tasks and a Gateway — so each capability has its own eligible
+// subset, same rules as the single-element panel: no color on connections/
+// lanes/pools, no System/Location/Description on connections, no resize on
+// non-resizable types). Recomputed on every renderBulkPropsPanel() call, so
+// the bulk buttons (defined as plain onclick="..." globals, which can't
+// close over a local array) read it fresh each time.
+let bulkPropsTargets = { color: [], meta: [], resize: [] };
+
+// Multi-select Properties panel: unlike the single-element panel there's no
+// one Name/Type/Id to show, so instead this surfaces only the fields that
+// make sense to set identically across a whole group at once — Size, Fill
+// color, System, Location, Description, Details — each applied only to the
+// subset of the selection that actually supports it. Renamed elements,
+// per-type actions (Call Activity target, "Enter subprocess") and the raw
+// Name/Type/Id rows are deliberately left out: they're inherently
+// per-element, and showing one of them "for the group" would either be
+// meaningless or actively dangerous (e.g. giving every selected element the
+// exact same Name).
+function renderBulkPropsPanel(panel, selection) {
+  // A label shares its parent shape's businessObject — if both the shape and
+  // its own label happen to be in `selection` (rare, but possible via
+  // lasso), counting both would just double up every field below.
+  const elements = selection.filter(el => el.type !== 'label' && el.businessObject);
+
+  const collapseBtn = `<button class="props-collapse-btn" onclick="togglePropsPanelCollapsed()"
+    title="${propsPanelCollapsed ? 'Show properties' : 'Hide properties'}">${propsPanelCollapsed ? '▲' : '▼'}</button>`;
+  const labelRow = `<div class="props-label-row"><div class="props-label">Properties</div>${collapseBtn}</div>`;
+
+  if (propsPanelCollapsed) {
+    panel.innerHTML = labelRow;
+    panel.style.display = 'block';
+    return;
+  }
+
+  const colorEls = elements.filter(el => el.businessObject.$type && !NO_COLOR_TYPES.includes(el.businessObject.$type));
+  const metaEls = elements.filter(el => el.businessObject.id && el.businessObject.$type &&
+    !DETAIL_FIELDS_EXCLUDED_TYPES.includes(el.businessObject.$type));
+  const resizeEls = elements.filter(el => typeof el.width === 'number' && typeof el.height === 'number' && !el.waypoints &&
+    modeler.get('rules').allowed('shape.resize', { shape: el }));
+
+  bulkPropsTargets = {
+    color: colorEls.map(el => el.id),
+    meta: metaEls.map(el => el.id),
+    resize: resizeEls.map(el => el.id)
+  };
+
+  const typeCounts = {};
+  elements.forEach(el => {
+    const t = (el.businessObject.$type || el.type || '?').replace('bpmn:', '');
+    typeCounts[t] = (typeCounts[t] || 0) + 1;
+  });
+  const typeSummary = Object.entries(typeCounts).map(([t, n]) => `${n} × ${t}`).join(', ');
+
+  let html = labelRow;
+  html += `<div class="prop-row"><div class="prop-name">Selection</div>
+    <div class="prop-val">${elements.length} elements selected</div></div>`;
+  html += `<div class="prop-row" style="margin-top:-6px;">
+    <div class="prop-val" style="color:#888;font-size:11px;">${escHtml(typeSummary)}</div></div>`;
+
+  if (resizeEls.length > 0) {
+    // Seeded from the first resizable element purely as a starting value —
+    // Apply always sets every eligible element to exactly this width/height
+    // (each keeps its own x/y top-left corner, same as single-element resize).
+    const seed = resizeEls[0];
+    html += `<div class="prop-row">
+      <div class="prop-name">Size (${resizeEls.length} resizable)</div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <input class="prop-input" type="number" min="${MIN_SHAPE_SIZE}" step="1" style="width:64px;"
+          id="bulk-prop-width" value="${Math.round(seed.width)}">
+        <span style="color:#999;">×</span>
+        <input class="prop-input" type="number" min="${MIN_SHAPE_SIZE}" step="1" style="width:64px;"
+          id="bulk-prop-height" value="${Math.round(seed.height)}">
+        <span style="color:#999;font-size:11px;">px</span>
+      </div>
+      <button class="prop-btn" style="margin-top:6px;" onclick="applyBulkSize()">Apply to ${resizeEls.length} element${resizeEls.length === 1 ? '' : 's'}</button>
+    </div>`;
+  }
+
+  if (colorEls.length > 0) {
+    html += buildBulkColorPicker(colorEls);
+  }
+
+  if (metaEls.length > 0) {
+    html += buildBulkMetaSelect({
+      id: 'bulk-prop-system', label: 'System', count: metaEls.length,
+      items: dictionaries.systems || [], metaKey: 'system', metaEls,
+      onchange: 'applyBulkSystem(this.value)'
+    });
+    html += buildBulkMetaSelect({
+      id: 'bulk-prop-location', label: 'Location', count: metaEls.length,
+      items: dictionaries.locations || [], metaKey: 'location', metaEls,
+      onchange: 'applyBulkLocation(this.value)'
+    });
+    html += buildBulkMetaSelect({
+      id: 'bulk-prop-device', label: 'Device', count: metaEls.length,
+      items: dictionaries.devices || [], metaKey: 'device', metaEls,
+      onchange: 'applyBulkDevice(this.value)'
+    });
+
+    html += `<div class="prop-row" style="margin-top:10px;">
+      <div class="prop-name">Description — overwrite all</div>
+      <textarea class="prop-textarea" id="bulk-prop-description"
+        placeholder="Type text, then Apply — overwrites Description on all ${metaEls.length} selected elements"></textarea>
+      <button class="prop-btn" style="margin-top:6px;" onclick="applyBulkDescription()">Apply to ${metaEls.length} element${metaEls.length === 1 ? '' : 's'}</button>
+    </div>`;
+
+    html += `<div class="prop-row">
+      <div class="prop-name">Details (URL) — overwrite all</div>
+      <input class="prop-input" type="url" id="bulk-prop-details" placeholder="https://...">
+      <button class="prop-btn" style="margin-top:6px;" onclick="applyBulkDetails()">Apply to ${metaEls.length} element${metaEls.length === 1 ? '' : 's'}</button>
+    </div>`;
+  }
+
+  if (!resizeEls.length && !colorEls.length && !metaEls.length) {
+    html += `<div class="prop-row"><div class="prop-val" style="color:#aaa;">None of the selected elements support shared editing (e.g. only connections are selected).</div></div>`;
+  }
+
+  panel.innerHTML = html;
+  panel.style.display = 'block';
+}
+
+// Builds a <select> for a metadata field (System/Location) that also
+// represents "the selection doesn't agree" as an explicit, non-selectable
+// "— mixed —" option, distinct from "— none —" (every element explicitly
+// has no value) — picking either always overwrites the whole group.
+function buildBulkMetaSelect({ id, label, count, items, metaKey, metaEls, onchange }) {
+  const values = new Set(metaEls.map(el => getElementMeta(el.businessObject, metaKey)));
+  const mixed = values.size > 1;
+  const common = mixed ? null : [...values][0];
+
+  let opts = '';
+  if (mixed) opts += `<option value="" disabled selected>— mixed —</option>`;
+  opts += `<option value="" ${!mixed && common === '' ? 'selected' : ''}>— none —</option>`;
+  opts += items.map(it =>
+    `<option value="${escHtml(it.id)}" ${!mixed && it.id === common ? 'selected' : ''}>${escHtml(it.name || '(unnamed)')}</option>`
+  ).join('');
+
+  return `<div class="prop-row" style="margin-top:10px;">
+    <div class="prop-name">${label} (${count} elements)</div>
+    <select class="prop-input" id="${id}" onchange="${onchange}">${opts}</select>
+  </div>`;
+}
+
+// Same swatch UI as buildColorPicker(), but applying sets the color across
+// every color-eligible element in the current selection in ONE
+// modeling.setColor() call — bpmn-js's setColor accepts an element array
+// natively, so (unlike the per-element metadata fields below) this bulk
+// action is a single undo step, not one step per element.
+function buildBulkColorPicker(colorEls) {
+  const fills = new Set(colorEls.map(el => {
+    try { return (el.di && el.di.fill) || ''; } catch (e) { return ''; }
+  }));
+  const commonFill = fills.size === 1 ? [...fills][0] : null;
+
+  let swatches = `<div class="color-palette">`;
+  swatches += `<div class="color-swatch none${!commonFill ? ' active' : ''}" title="Remove color" onclick="clearBulkColor()"></div>`;
+  COLOR_PALETTE.forEach(c => {
+    const isActive = commonFill && commonFill.toLowerCase() === c.hex.toLowerCase();
+    swatches += `<div class="color-swatch${isActive ? ' active' : ''}"
+      style="background:${c.hex}; border-color: ${isActive ? '#1a6bb5' : darken(c.hex, 0.8)};"
+      title="${escHtml(c.label)}"
+      onclick="applyBulkColor('${c.hex}')"></div>`;
+  });
+  swatches += `</div>`;
+
+  const customRow = `<div class="color-row">
+    <label>Custom:</label>
+    <input type="color" id="bulk-custom-fill-picker" value="${commonFill || '#ffffff'}"
+      oninput="document.getElementById('bulk-custom-fill-preview').style.background=this.value"
+      onchange="document.getElementById('bulk-custom-fill-preview').style.background=this.value">
+    <div class="color-preview-box" id="bulk-custom-fill-preview" style="background:${commonFill || '#ffffff'};"></div>
+    <button class="color-apply-btn" onclick="applyBulkColor(document.getElementById('bulk-custom-fill-picker').value)">Apply</button>
+  </div>`;
+
+  return `<div class="color-section">
+    <div class="prop-name" style="margin-bottom:6px;">Fill color (${colorEls.length} elements)</div>
+    ${swatches}
+    ${customRow}
+  </div>`;
+}
+
+function applyBulkSize() {
+  const w = document.getElementById('bulk-prop-width');
+  const h = document.getElementById('bulk-prop-height');
+  if (!w || !h) return;
+  let newWidth = Math.round(parseFloat(w.value));
+  let newHeight = Math.round(parseFloat(h.value));
+  if (!isFinite(newWidth) || newWidth < MIN_SHAPE_SIZE) newWidth = MIN_SHAPE_SIZE;
+  if (!isFinite(newHeight) || newHeight < MIN_SHAPE_SIZE) newHeight = MIN_SHAPE_SIZE;
+  w.value = newWidth;
+  h.value = newHeight;
+
+  const er = modeler.get('elementRegistry');
+  const modeling = modeler.get('modeling');
+  const rules = modeler.get('rules');
+  let applied = 0;
+  bulkPropsTargets.resize.forEach(id => {
+    const el = er.get(id);
+    if (!el || !rules.allowed('shape.resize', { shape: el })) return;
+    if (el.width === newWidth && el.height === newHeight) return;
+    modeling.resizeShape(el, { x: el.x, y: el.y, width: newWidth, height: newHeight });
+    applied++;
+  });
+  refreshDetailOverlays();
+  setStatus(`Size applied to ${applied} element${applied === 1 ? '' : 's'}`, 'ok');
+}
+
+function applyBulkColor(hex) {
+  const er = modeler.get('elementRegistry');
+  const els = bulkPropsTargets.color.map(id => er.get(id)).filter(Boolean);
+  if (!els.length) return;
+  modeler.get('modeling').setColor(els, { fill: hex, stroke: darken(hex) });
+  setStatus(`Color applied to ${els.length} elements`, 'ok');
+  updatePropsPanel(modeler.get('selection').get());
+}
+
+function clearBulkColor() {
+  const er = modeler.get('elementRegistry');
+  const els = bulkPropsTargets.color.map(id => er.get(id)).filter(Boolean);
+  if (!els.length) return;
+  modeler.get('modeling').setColor(els, { fill: null, stroke: null });
+  setStatus(`Color removed from ${els.length} elements`, 'ok');
+  updatePropsPanel(modeler.get('selection').get());
+}
+
+// Metadata (System/Location/Description/Details) lives in a plain in-memory
+// map keyed by element id (see setElementMeta/flushMetaToModel above), not
+// on a bpmn-js command — so unlike Size/Color there's no native multi-
+// element call. Looping is fine functionally, but note it's N undo steps,
+// not one: Ctrl+Z after a bulk metadata edit reverts one element at a time.
+function applyBulkSystem(systemId) {
+  const er = modeler.get('elementRegistry');
+  bulkPropsTargets.meta.forEach(id => {
+    const el = er.get(id);
+    if (el) setElementMeta(el.businessObject, 'system', systemId);
+  });
+  flushMetaToModel();
+  refreshDetailOverlays();
+  setStatus(`System applied to ${bulkPropsTargets.meta.length} elements`, 'ok');
+}
+
+function applyBulkLocation(locationId) {
+  const er = modeler.get('elementRegistry');
+  bulkPropsTargets.meta.forEach(id => {
+    const el = er.get(id);
+    if (el) setElementMeta(el.businessObject, 'location', locationId);
+  });
+  flushMetaToModel();
+  refreshDetailOverlays();
+  setStatus(`Location applied to ${bulkPropsTargets.meta.length} elements`, 'ok');
+}
+
+function applyBulkDevice(deviceId) {
+  const er = modeler.get('elementRegistry');
+  bulkPropsTargets.meta.forEach(id => {
+    const el = er.get(id);
+    if (el) setElementMeta(el.businessObject, 'device', deviceId);
+  });
+  flushMetaToModel();
+  refreshDetailOverlays();
+  setStatus(`Device applied to ${bulkPropsTargets.meta.length} elements`, 'ok');
+}
+
+function applyBulkDescription() {
+  const input = document.getElementById('bulk-prop-description');
+  if (!input) return;
+  const er = modeler.get('elementRegistry');
+  bulkPropsTargets.meta.forEach(id => {
+    const el = er.get(id);
+    if (el) setElementMeta(el.businessObject, 'description', input.value);
+  });
+  flushMetaToModel();
+  setStatus(`Description applied to ${bulkPropsTargets.meta.length} elements`, 'ok');
+}
+
+function applyBulkDetails() {
+  const input = document.getElementById('bulk-prop-details');
+  if (!input) return;
+  const er = modeler.get('elementRegistry');
+  bulkPropsTargets.meta.forEach(id => {
+    const el = er.get(id);
+    if (el) setElementMeta(el.businessObject, 'details', input.value);
+  });
+  flushMetaToModel();
+  refreshDetailOverlays();
+  setStatus(`Details applied to ${bulkPropsTargets.meta.length} elements`, 'ok');
+}
+
 function updatePropsPanel(selection) {
   const panel = document.getElementById('props-panel');
-  if (!selection || selection.length !== 1) {
+  if (!selection || selection.length === 0) {
     panel.style.display = 'none';
     panel.innerHTML = '';
+    return;
+  }
+  if (selection.length > 1) {
+    renderBulkPropsPanel(panel, selection);
     return;
   }
 
@@ -2143,8 +2850,6 @@ function updatePropsPanel(selection) {
   }
 
   // Color picker — for all elements that have a fill
-  const NO_COLOR_TYPES = ['bpmn:SequenceFlow', 'bpmn:MessageFlow', 'bpmn:Association',
-    'bpmn:DataInputAssociation', 'bpmn:DataOutputAssociation', 'bpmn:Lane', 'bpmn:Participant'];
   const supportsColor = !!type && !NO_COLOR_TYPES.includes(type);
   if (supportsColor) {
     html += buildColorPicker(id);
@@ -2195,6 +2900,18 @@ function updatePropsPanel(selection) {
       <select class="prop-input" id="prop-location-${safeId}" onchange="setElementLocation('${safeId}', this.value)">
         <option value="">— none —</option>
         ${locationOptions}
+      </select>
+    </div>`;
+
+    const currentDeviceId = getElementMeta(bo, 'device');
+    const deviceOptions = (dictionaries.devices || []).map(d =>
+      `<option value="${escHtml(d.id)}" ${d.id === currentDeviceId ? 'selected' : ''}>${escHtml(d.name || '(unnamed)')}</option>`
+    ).join('');
+    html += `<div class="prop-row">
+      <div class="prop-name">Device</div>
+      <select class="prop-input" id="prop-device-${safeId}" onchange="setElementDevice('${safeId}', this.value)">
+        <option value="">— none —</option>
+        ${deviceOptions}
       </select>
     </div>`;
 
@@ -2411,7 +3128,12 @@ document.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'o') { e.preventDefault(); triggerFileOpen(); }
   if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
   if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); redo(); }
-  if (e.key === 'Escape' && navStack.length > 0) navigateUp();
+  // Escape intentionally does NOT navigate up to the parent process anymore
+  // — jumping planes on Escape was reported as disruptive (easy to trigger
+  // by accident, e.g. while just trying to drop a selection). bpmn-js's own
+  // Keyboard module already binds Escape to clear the current selection —
+  // that default is left alone; we simply no longer layer plane navigation
+  // on top of it.
   // bpmn-js's own diagram already binds Ctrl/Cmd +, -, 0 to its own
   // per-tab zoom once the canvas has focus (see focusCanvas()) — so we
   // don't re-implement the zoom itself here (that would double it up on

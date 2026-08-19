@@ -317,15 +317,34 @@
       background: currentColor;
     }
 
+    /* Fixed height + border-box + flex centering (rather than deriving the
+       total height from padding + this text's line-height) so this lines up
+       with #breadcrumb pixel-for-pixel regardless of font metrics — two
+       different font-sizes (11px here, 12px there) computing their
+       line-heights independently was enough to round to different totals
+       on some browsers/OSes even though the declared padding summed to the
+       same number. A fixed height is deterministic instead of relying on
+       that arithmetic lining up. */
     #structure-header {
-      padding: 10px 12px 8px;
+      min-height: 32px;
+      box-sizing: border-box;
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
       font-size: 11px;
       font-weight: 600;
       color: #888;
       text-transform: uppercase;
       letter-spacing: 0.05em;
-      border-bottom: 1px solid #e8e8e4;
-      background: #f5f5f0;
+      /* Same divider color as #breadcrumb's border-bottom (and the
+         palette/structure-panel side borders) — was #e8e8e4 here, one shade
+         off from breadcrumb's #e0e0dc. */
+      border-bottom: 1px solid #e0e0dc;
+      /* Same fill as the left tool palette (#palette-panel) and the
+         breadcrumb bar (#breadcrumb) — one consistent "chrome" color across
+         all three bands, rather than each having its own slightly
+         different off-white. */
+      background: #fafaf8;
       flex-shrink: 0;
     }
 
@@ -482,43 +501,59 @@
       overflow: hidden;
     }
 
-    /* breadcrumb — appears when you're inside a subprocess */
+    /* bpmn-js ships its own breadcrumbs trail, auto-inserted into the canvas
+       whenever the plane changes (including via its own built-in drilldown
+       arrow overlay on a collapsed sub-process). We have our own styled
+       equivalent (#breadcrumb below) that also works for tree-based
+       navigation, so the native one is redundant — and left unstyled, it's
+       what made canvas-arrow navigation show a different-looking bar than
+       Process-structure-tree navigation. Hidden outright rather than styled
+       to match, since ours already covers every case it would. */
+    .bjs-breadcrumbs { display: none !important; }
+
+    /* breadcrumb — appears when you're inside a subprocess. Gray/neutral,
+       not yellow: this is just "here's where you are" wayfinding, not a
+       warning — a yellow bar reads as "something needs attention". Same
+       fill as the left tool palette and the "Process structure" header
+       (#fafaf8). Fixed height (matching #structure-header's, same
+       border-box + explicit-height approach — see the comment there) rather
+       than one derived from padding, so the two bars are guaranteed
+       pixel-identical instead of relying on two different font-sizes'
+       line-heights happening to round to the same total. */
     #breadcrumb {
       display: none;
+      min-height: 32px;
+      box-sizing: border-box;
       align-items: center;
       gap: 6px;
-      padding: 5px 12px;
-      background: #fffbe6;
-      border-bottom: 1px solid #e8d040;
+      padding: 0 12px;
+      background: #fafaf8;
+      border-bottom: 1px solid #e0e0dc;
       font-size: 12px;
       flex-shrink: 0;
       flex-wrap: wrap;
     }
     #breadcrumb.visible { display: flex; }
+    .bc-static-label {
+      font-weight: 600;
+      color: #888;
+      margin-right: 2px;
+      white-space: nowrap;
+    }
     .bc-item {
       display: flex;
       align-items: center;
       gap: 4px;
       cursor: pointer;
-      color: #7a5500;
+      color: #555;
       padding: 2px 6px;
       border-radius: 4px;
       font-size: 12px;
     }
-    .bc-item:hover { background: #fef3b0; }
-    .bc-item.current { font-weight: 500; color: #4a3300; cursor: default; }
+    .bc-item:hover { background: #e8e8e4; }
+    .bc-item.current { font-weight: 500; color: #333; cursor: default; }
     .bc-item.current:hover { background: transparent; }
     .bc-sep { color: #ccc; font-size: 11px; }
-    .bc-back-btn {
-      padding: 2px 10px;
-      font-size: 12px;
-      background: #fff;
-      border-color: #c8a820;
-      color: #7a5500;
-      border-radius: 5px;
-      margin-right: 8px;
-    }
-    .bc-back-btn:hover { background: #fef3b0; }
 
     #canvas {
       flex: 1;
@@ -623,6 +658,23 @@
        (mirror of the detail-link-overlay icon, which sits above on the right).
        Same wrap-to-2-lines behavior as the system badge. */
     .location-badge-overlay {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 600;
+      line-height: 1.4;
+      white-space: normal;
+      word-break: break-word;
+      text-align: center;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+      pointer-events: none;
+    }
+
+    /* Extended details — device badge below the element, right side
+       (mirror of the system badge, which sits below on the left).
+       Same wrap-to-2-lines behavior as the system/location badges. */
+    .device-badge-overlay {
       display: inline-block;
       padding: 2px 7px;
       border-radius: 4px;
