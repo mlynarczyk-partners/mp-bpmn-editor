@@ -646,6 +646,8 @@ function applyCallActivityTarget(elementId) {
   document.getElementById('call-activity-dialog').remove();
   setStatus('Call Activity → ' + targetId, 'ok');
   updateTree();
+  refreshDetailOverlays();
+  updatePropsPanel(modeler.get('selection').get());
 }
 
 function findPathToSubprocess(targetBo) {
@@ -902,18 +904,22 @@ function initModeler() {
   // bounding box back, rather than relying on any assumption about how
   // bpmn-js repositioned the new shape.
   //
-  // This also covers a freshly-replaced COLLAPSED Sub-Process, which is
+  // This also covers a freshly-replaced COLLAPSED Sub-Process (regular OR
+  // Ad-hoc — bpmn:AdHocSubProcess is modeled as its own concrete type, not
+  // just a flag on bpmn:SubProcess, so it needs listing explicitly here too;
+  // it has exactly the same "shrinks to the default box" behavior), which is
   // still task-sized visually — but deliberately NOT an expanded one, since
   // that's a container that's meant to grow and forcing it back to
   // task-size would make it useless.
-  const TYPE_CHANGE_SIZE_PRESERVE_TYPES = RESIZABLE_TASK_TYPES.concat(['bpmn:SubProcess']);
+  const SUBPROCESS_LIKE_TYPES = ['bpmn:SubProcess', 'bpmn:AdHocSubProcess'];
+  const TYPE_CHANGE_SIZE_PRESERVE_TYPES = RESIZABLE_TASK_TYPES.concat(SUBPROCESS_LIKE_TYPES);
   modeler.get('eventBus').on('commandStack.shape.replace.postExecuted', function(event) {
     const context = event.context || {};
     const oldShape = context.oldShape;
     const newShape = context.newShape;
     if (!oldShape || !newShape) return;
     if (!TYPE_CHANGE_SIZE_PRESERVE_TYPES.includes(oldShape.type) || !TYPE_CHANGE_SIZE_PRESERVE_TYPES.includes(newShape.type)) return;
-    if (newShape.type === 'bpmn:SubProcess' && newShape.collapsed === false) return;
+    if (SUBPROCESS_LIKE_TYPES.includes(newShape.type) && newShape.collapsed === false) return;
     if (oldShape.width === newShape.width && oldShape.height === newShape.height &&
         oldShape.x === newShape.x && oldShape.y === newShape.y) return;
     modeler.get('modeling').resizeShape(newShape, {
@@ -927,6 +933,79 @@ function initModeler() {
     // we restored the old bounds here — refresh it so the Size fields don't
     // show a stale default.
     updatePropsPanel(modeler.get('selection').get());
+  });
+
+  // Collapsing/expanding an EXISTING sub-process (the small "+/-" affordance,
+  // separate from the "Change element" type-replace above) goes through a
+  // different bpmn-js command entirely — "shape.toggleCollapse" — which the
+  // hook above never sees. bpmn-js's own behavior for that command always
+  // resizes to its built-in default collapsed box (100x80-ish) when
+  // collapsing, discarding whatever size the sub-process actually had — and
+  // this applies to bpmn:AdHocSubProcess too (bpmn-js's own toggle-collapse
+  // behavior matches it via BPMN's type hierarchy, where AdHocSubProcess
+  // extends SubProcess, even though our own checks here compare concrete
+  // type strings and so need it listed explicitly alongside SubProcess).
+  // Capture the pre-toggle bounds in preExecute (before bpmn-js's own resize
+  // runs) and restore them in postExecuted at a LOWER priority than bpmn-js's
+  // own toggle-collapse behavior (500) so ours runs after it and gets the
+  // final word — mirroring the shape.replace fix above, just for this other
+  // command. Only restores on COLLAPSE: expanding is deliberately left to
+  // bpmn-js's own "grow to fit children" sizing.
+  modeler.get('eventBus').on('commandStack.shape.toggleCollapse.preExecute', function(event) {
+    const shape = event.context && event.context.shape;
+    if (!shape) return;
+    event.context.mpOldBounds = { x: shape.x, y: shape.y, width: shape.width, height: shape.height };
+  });
+  modeler.get('eventBus').on('commandStack.shape.toggleCollapse.postExecuted', 100, function(event) {
+    const context = event.context || {};
+    const shape = context.shape;
+    const oldBounds = context.mpOldBounds;
+    if (!shape || !oldBounds || !SUBPROCESS_LIKE_TYPES.includes(shape.type) || !shape.collapsed) return;
+    if (shape.width === oldBounds.width && shape.height === oldBounds.height &&
+        shape.x === oldBounds.x && shape.y === oldBounds.y) return;
+    modeler.get('modeling').resizeShape(shape, oldBounds);
+    updatePropsPanel(modeler.get('selection').get());
+  });
+
+  // Double-clicking truly blank canvas while inside a sub-process (or
+  // ad-hoc sub-process) plane made every element name on that plane vanish,
+  // permanently, until reload. Root cause: a click that doesn't land on any
+  // child shape's own graphics falls through to whatever gfx IS registered
+  // at that point — which turns out to be the CURRENT ROOT element's own
+  // layer (the sub-process you're currently standing inside), not "nothing".
+  // bpmn-js's diagram-js delegate layer then fires "element.dblclick" with
+  // that root as the target element, and its own LabelEditingProvider
+  // activates direct-editing on it UNCONDITIONALLY — it only skips elements
+  // that fail a type check on click, but for dblclick it always passes
+  // `force=true`, bypassing that check entirely (see LabelEditingProvider in
+  // the vendor bundle). For a Task/CallActivity/SubProcess/Participant/Lane,
+  // activating direct-editing adds a "djs-label-hidden" CSS marker onto the
+  // target's own gfx group to hide its native label while the edit box is
+  // shown — and since the CSS rule for that marker
+  // (".djs-label-hidden .djs-label { display:none }") is a DESCENDANT
+  // selector, marking the CURRENT ROOT's own group (which visually contains
+  // every child element on this plane) hides every label on the whole
+  // plane at once. The edit box itself gets positioned using the root
+  // element's bounds from its PARENT plane's coordinate system — which is
+  // meaningless on the child plane we're actually viewing — so it ends up
+  // invisible/unreachable, meaning the user has no textbox to Escape out of
+  // and the hide-everything marker never gets cleaned up. (This doesn't
+  // happen on the very top-level Process, because a bare bpmn:Process
+  // doesn't match any of the types LabelEditingProvider adds that marker
+  // for — matching the original report that this seemed main-process-only.)
+  //
+  // Fix: nobody should be able to rename "the container I'm currently
+  // standing inside" via a stray double-click on its own empty canvas in
+  // the first place — that was never an intentional feature, just a gap in
+  // bpmn-js's own type check. Intercept at a higher priority than
+  // LabelEditingProvider's default-priority listener and swallow the event
+  // (returning `false` from a diagram-js eventBus listener stops
+  // propagation to lower-priority listeners) whenever the dblclick resolved
+  // to the current plane's own root element.
+  modeler.get('eventBus').on('element.dblclick', 2000, function(event) {
+    if (event.element === modeler.get('canvas').getRootElement()) {
+      return false;
+    }
   });
 
   // Configurable default size for brand-new tasks (Settings ⚙ → "Default
@@ -1431,6 +1510,7 @@ const NO_COLOR_TYPES = ['bpmn:SequenceFlow', 'bpmn:MessageFlow', 'bpmn:Associati
 let extendedDetailsEnabled = false;
 try { extendedDetailsEnabled = localStorage.getItem('bpmnEditor.extendedDetails') === '1'; } catch(e) {}
 let detailOverlayIds = [];
+let callActivityOverlayIds = [];
 
 function toggleExtendedDetails() {
   extendedDetailsEnabled = !extendedDetailsEnabled;
@@ -1449,9 +1529,62 @@ function updateExtendedDetailsButton() {
     : 'Extended details are off';
 }
 
+// Call Activities never get bpmn-js's own native "drilldown" arrow overlay —
+// that built-in affordance (see _canDrillDown in the vendor bundle) is
+// hard-wired to bpmn:SubProcess only, regardless of whether a Call Activity
+// has a calledElement set. So we draw our own, reusing the exact same
+// markup/CSS-class/position bpmn-js uses for its native arrow (extracted
+// from the vendor bundle) so it's visually indistinguishable. Unlike the
+// System/Location/Device badges below, this must stay visible regardless of
+// the Extended-details toggle — it's core navigation, not an optional
+// detail — so it's a separate always-on overlay set, refreshed from inside
+// refreshDetailOverlays() (which already runs at every point the current
+// plane's contents can change) rather than gated by it.
+function refreshCallActivityOverlays() {
+  if (!modeler) return;
+  const overlays = modeler.get('overlays');
+
+  callActivityOverlayIds.forEach(id => { try { overlays.remove(id); } catch(e) {} });
+  callActivityOverlayIds = [];
+
+  const planes = modeler.get('canvas')._planes || [];
+
+  getElementsInCurrentPlane().forEach(el => {
+    if (el.labelTarget) return;
+    const bo = el.businessObject;
+    if (!bo || bo.$type !== 'bpmn:CallActivity') return;
+    const targetId = bo.calledElement;
+    if (!targetId) return;
+    const targetPlane = planes.find(p => p.rootElement && p.rootElement.businessObject &&
+      p.rootElement.businessObject.id === targetId);
+    if (!targetPlane) return; // target missing/deleted — no arrow to show
+
+    try {
+      const targetBo = targetPlane.rootElement.businessObject;
+      const isEmpty = !(targetBo.flowElements && targetBo.flowElements.length);
+      const title = escHtml(targetBo.name || targetId);
+      const overlayId = overlays.add(el, 'call-activity-drilldown', {
+        position: { bottom: -7, right: -8 },
+        html: `<button type="button" class="bjs-drilldown${isEmpty ? ' bjs-drilldown-empty' : ''}"
+          title="Open ${title}" onmousedown="event.stopPropagation()"
+          onclick="treeNavigateToCallActivity('${escHtml(el.id)}')">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 16 16">
+            <path fill-rule="evenodd" d="M4.81801948,3.50735931 L10.4996894,9.1896894 L10.5,4 L12,4 L12,12 L4,12 L4,10.5 L9.6896894,10.4996894 L3.75735931,4.56801948 C3.46446609,4.27512627 3.46446609,3.80025253 3.75735931,3.50735931 C4.05025253,3.21446609 4.52512627,3.21446609 4.81801948,3.50735931 Z"/>
+          </svg>
+        </button>`
+      });
+      callActivityOverlayIds.push(overlayId);
+    } catch(e) {
+      // element may not have its own graphical representation — skip
+    }
+  });
+}
+
 function refreshDetailOverlays() {
   if (!modeler) return;
   const overlays = modeler.get('overlays');
+
+  refreshCallActivityOverlays();
 
   // Remove previous overlays — easier to rebuild from scratch than to diff.
   detailOverlayIds.forEach(id => { try { overlays.remove(id); } catch(e) {} });
@@ -2939,18 +3072,76 @@ function updatePropsPanel(selection) {
 }
 
 function convertToCallActivity(elementId) {
-  const modeling = modeler.get('modeling');
   const er = modeler.get('elementRegistry');
   const el = er.get(elementId);
   if (!el) return;
-  modeling.updateProperties(el, { $type: undefined });
-  // bpmn-js doesn't allow changing $type via updateProperties
-  // Use replaceShape to turn the element into a callActivity
-  const bpmnFactory = modeler.get('bpmnFactory');
+  // bpmn-js doesn't allow changing $type via updateProperties — use
+  // bpmnReplace to actually turn the element into a Call Activity.
   const replace = modeler.get('bpmnReplace');
-  replace.replaceElement(el, { type: 'bpmn:CallActivity' });
+  const newEl = replace.replaceElement(el, { type: 'bpmn:CallActivity' });
   setStatus('Converted to Call Activity', 'ok');
-  setTimeout(() => openCallActivitySelector(elementId), 200);
+  createAndLinkNewCallActivityTarget(newEl.id);
+}
+
+// A brand-new Call Activity has nowhere to "enter" until it's linked to a
+// target sub-process — unlike converting an element straight to
+// bpmn:SubProcess, which gets its own (empty, but real) inner canvas
+// immediately. To match that experience rather than dropping the user into
+// a "Select target" dialog with nothing in it yet, auto-create a brand-new,
+// empty bpmn:SubProcess right below the Call Activity (in the same parent
+// container) and link calledElement to it right away — same underlying
+// calledElement-as-file-internal-reference mechanism this app's Call
+// Activity support already uses elsewhere (see
+// treeNavigateToCallActivity/openCallActivitySelector/applyCallActivityTarget),
+// just skipping the manual "pick a target" step for the common case of a
+// freshly created Call Activity with no target yet. The user can still
+// re-point it to a different existing subprocess afterwards via "Change
+// target…", and the auto-created subprocess is never auto-deleted (e.g. by
+// "Remove link (→ Task)") to avoid unexpected data loss.
+function createAndLinkNewCallActivityTarget(callActivityId) {
+  const er = modeler.get('elementRegistry');
+  const el = er.get(callActivityId);
+  if (!el) return;
+
+  const modeling = modeler.get('modeling');
+  const elementFactory = modeler.get('elementFactory');
+  const bpmnFactory = modeler.get('bpmnFactory');
+
+  const targetBo = bpmnFactory.create('bpmn:SubProcess', { name: 'New subprocess' });
+  const shape = elementFactory.createShape({
+    type: 'bpmn:SubProcess',
+    businessObject: targetBo,
+    isExpanded: false
+  });
+
+  // modeling.createShape's position argument is the shape's CENTER point —
+  // place it centered under the Call Activity with a small gap.
+  const gap = 40;
+  const position = {
+    x: el.x + el.width / 2,
+    y: el.y + el.height + gap + shape.height / 2
+  };
+
+  try {
+    modeling.createShape(shape, position, el.parent);
+  } catch (e) {
+    setStatus('Could not auto-create subprocess target', 'err');
+    return;
+  }
+
+  modeling.updateProperties(el, { calledElement: targetBo.id });
+
+  // modeling.createShape() selects the shape it just created (the new
+  // target sub-process) — left alone, the Properties panel would then show
+  // that brand-new, still-unnamed sub-process instead of the Call Activity
+  // the user actually has selected/is looking at. Re-select the Call
+  // Activity itself so the panel (and its "Target (calledElement)" /
+  // "Go to target ↗" rows) reflects what just happened to IT.
+  modeler.get('selection').select(el);
+  refreshDetailOverlays();
+  updateTree();
+  updatePropsPanel(modeler.get('selection').get());
+  setStatus('Call Activity → new empty subprocess created', 'ok');
 }
 
 function convertCallActivityToTask(elementId) {
@@ -2961,6 +3152,7 @@ function convertCallActivityToTask(elementId) {
   replace.replaceElement(el, { type: 'bpmn:Task' });
   setStatus('Call Activity link removed', 'ok');
   updateTree();
+  refreshDetailOverlays();
 }
 
 function escHtml(str) {
