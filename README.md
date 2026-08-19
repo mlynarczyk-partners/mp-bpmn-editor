@@ -13,7 +13,7 @@ Made by [Mlynarczyk & Partners](https://mlynarczyk-partners.com/en/home/).
 - A configurable default size for newly created tasks, applied consistently across every task subtype.
 
 ### File handling
-- New / Open… / Save .bpmn, using the native file picker (File System Access API) with a download-based fallback for browsers that don't support it.
+- New / Open… / Save, using the native file picker (File System Access API) with a download-based fallback for browsers that don't support it.
 - Drag-and-drop import of `.bpmn` / `.xml` files.
 - Auto-save: a debounced, silent write-back to the currently open file once it's been opened or saved through the native picker.
 - The last file you had open is remembered (via an IndexedDB-stored file handle) and silently restored on reload, or offered with a one-click prompt if the browser requires explicit permission.

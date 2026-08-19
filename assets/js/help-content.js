@@ -8,7 +8,7 @@ const HELP_CONTENT = {
 <ul>
 <li><b>New</b> starts a blank diagram.</li>
 <li><b>Open…</b> lets you pick a <code>.bpmn</code> or <code>.xml</code> file from disk. You can also just drag a file onto the canvas.</li>
-<li><b>Save .bpmn</b> writes the diagram to disk under the name typed in the field next to it.</li>
+<li><b>Save</b> writes the diagram to disk (as a <code>.bpmn</code> file) under the name typed in the field next to it.</li>
 </ul>
 
 <h3>Auto-save &amp; reopening your last file</h3>
@@ -71,7 +71,7 @@ const HELP_CONTENT = {
 <ul>
 <li><b>New</b> tworzy pusty diagram.</li>
 <li><b>Open…</b> pozwala wybrać plik <code>.bpmn</code> lub <code>.xml</code> z dysku. Możesz też po prostu przeciągnąć plik na płótno.</li>
-<li><b>Save .bpmn</b> zapisuje diagram na dysku pod nazwą wpisaną w polu obok.</li>
+<li><b>Save</b> zapisuje diagram na dysku (jako plik <code>.bpmn</code>) pod nazwą wpisaną w polu obok.</li>
 </ul>
 
 <h3>Auto-zapis i wznawianie ostatniego pliku</h3>
@@ -134,7 +134,7 @@ const HELP_CONTENT = {
 <ul>
 <li><b>New</b> — создаёт пустую диаграмму.</li>
 <li><b>Open…</b> — позволяет выбрать файл <code>.bpmn</code> или <code>.xml</code> с диска. Файл также можно просто перетащить на холст.</li>
-<li><b>Save .bpmn</b> — сохраняет диаграмму на диск под именем, указанным в поле рядом с кнопкой.</li>
+<li><b>Save</b> — сохраняет диаграмму на диск (как файл <code>.bpmn</code>) под именем, указанным в поле рядом с кнопкой.</li>
 </ul>
 
 <h3>Автосохранение и восстановление последнего файла</h3>

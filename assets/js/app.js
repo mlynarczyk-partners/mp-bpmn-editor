@@ -975,20 +975,34 @@ function initModeler() {
     const oldShape = context.oldShape;
     const newShape = context.newShape;
     if (!oldShape || !newShape) return;
-    if (!TYPE_CHANGE_SIZE_PRESERVE_TYPES.includes(oldShape.type) || !TYPE_CHANGE_SIZE_PRESERVE_TYPES.includes(newShape.type)) return;
-    if (SUBPROCESS_LIKE_TYPES.includes(newShape.type) && newShape.collapsed === false) return;
-    if (oldShape.width === newShape.width && oldShape.height === newShape.height &&
-        oldShape.x === newShape.x && oldShape.y === newShape.y) return;
-    modeler.get('modeling').resizeShape(newShape, {
-      x: oldShape.x,
-      y: oldShape.y,
-      width: oldShape.width,
-      height: oldShape.height
-    });
+    const sizePreserveEligible =
+      TYPE_CHANGE_SIZE_PRESERVE_TYPES.includes(oldShape.type) &&
+      TYPE_CHANGE_SIZE_PRESERVE_TYPES.includes(newShape.type) &&
+      !(SUBPROCESS_LIKE_TYPES.includes(newShape.type) && newShape.collapsed === false) &&
+      (oldShape.width !== newShape.width || oldShape.height !== newShape.height ||
+        oldShape.x !== newShape.x || oldShape.y !== newShape.y);
+    if (sizePreserveEligible) {
+      modeler.get('modeling').resizeShape(newShape, {
+        x: oldShape.x,
+        y: oldShape.y,
+        width: oldShape.width,
+        height: oldShape.height
+      });
+    }
+    // Any type change via the context-pad's "Change element" replaces the
+    // shape outright: the old shape (and its overlays — dictionary badges,
+    // the details-link icon) is removed, and a brand-new shape is created.
+    // diagram-js cleans up the old shape's overlays automatically since the
+    // element itself is gone, but nothing re-adds them for the replacement
+    // — so without this, badges silently vanish until the user happens to
+    // resize the shape (resizing routes through applyElementSize(), the
+    // only other place that triggers a refresh). Refresh unconditionally,
+    // not just when the size-preservation branch above ran.
+    refreshDetailOverlays();
     // bpmn-js re-selects newShape as part of the replace, so the props
     // panel already re-rendered once (at the type's default size) before
-    // we restored the old bounds here — refresh it so the Size fields don't
-    // show a stale default.
+    // we (maybe) restored the old bounds here — refresh it so it reflects
+    // the new type/size rather than a stale render.
     updatePropsPanel(modeler.get('selection').get());
   });
 
@@ -1243,6 +1257,209 @@ async function saveDiagram() {
   }
 }
 
+/* ─── EXPORT (PNG / PDF) OF THE CURRENTLY VISIBLE PROCESS ───
+   Exports only the current plane — main process, or whichever sub-process
+   you've drilled into — never the whole tree. bpmn-js's own modeler.saveSVG()
+   already does exactly that: it reads canvas.getActiveLayer() (the plane
+   currently rendered on screen) and its bounding box, so other planes are
+   never touched. That SVG is then rasterized onto an offscreen canvas sized
+   to the diagram's own bounding box (in its own coordinate units) times a
+   fixed supersampling factor — NOT a fixed page size like A4 — so resolution
+   scales with how big/complex the current view actually is, capped only by
+   a safety ceiling so an enormous diagram can't produce a canvas bigger than
+   some browsers/OSes can rasterize. */
+
+const EXPORT_RASTER_SCALE = 3;
+const EXPORT_MAX_DIMENSION_PX = 8000;
+
+function toggleExportMenu(event) {
+  event.stopPropagation();
+  const menu = document.getElementById('export-menu');
+  if (!menu) return;
+  if (menu.style.display === 'flex') {
+    closeExportMenu();
+    return;
+  }
+  const btn = document.getElementById('export-toggle');
+  const rect = btn.getBoundingClientRect();
+  menu.style.left = rect.left + 'px';
+  menu.style.top = (rect.bottom + 4) + 'px';
+  // 'flex' (not 'block') — the CSS lays this out as a column flexbox, and an
+  // inline style always wins over the stylesheet's own `display: flex`, so
+  // setting the wrong value here would silently break the stacked layout.
+  menu.style.display = 'flex';
+  // Deferred: the click that just opened the menu would otherwise
+  // immediately bubble into this same listener and close it right away.
+  setTimeout(() => document.addEventListener('click', closeExportMenuOnOutsideClick), 0);
+}
+
+function closeExportMenu() {
+  const menu = document.getElementById('export-menu');
+  if (menu) menu.style.display = 'none';
+  document.removeEventListener('click', closeExportMenuOnOutsideClick);
+}
+
+function closeExportMenuOnOutsideClick(e) {
+  const menu = document.getElementById('export-menu');
+  const btn = document.getElementById('export-toggle');
+  if (menu && !menu.contains(e.target) && e.target !== btn) closeExportMenu();
+}
+
+async function exportCurrentView(format) {
+  closeExportMenu();
+  if (!modeler) return;
+  setStatus('Preparing ' + format.toUpperCase() + ' export…', '');
+  try {
+    const { svg } = await modeler.saveSVG();
+    // An empty plane (no shapes) gives saveSVG() a zero-size bounding box —
+    // width="0" height="0" — rather than erroring. Catch that up front
+    // instead of silently handing the user a blank white image/PDF.
+    const emptyDims = parseSvgDimensions(svg);
+    if (!emptyDims.width || !emptyDims.height) {
+      setStatus('Nothing to export — this view is empty', 'err');
+      return;
+    }
+    const raster = await rasterizeSvgToCanvas(svg);
+    const baseName = sanitizeFilename(suggestedExportBaseName());
+
+    if (format === 'png') {
+      const blob = await canvasToPngBlob(raster.canvas);
+      await saveBlobToFile(blob, baseName + '.png', 'PNG image', { 'image/png': ['.png'] });
+      setStatus('Exported: ' + baseName + '.png', 'ok');
+    } else {
+      if (!window.jspdf || !window.jspdf.jsPDF) throw new Error('PDF library not loaded');
+      const { jsPDF } = window.jspdf;
+      // Custom page size in px, exactly matching the rasterized image — the
+      // point is to avoid forcing the diagram into a fixed page like A4,
+      // which would either crop it or shrink it down to illegibility.
+      const orientation = raster.pixelWidth >= raster.pixelHeight ? 'landscape' : 'portrait';
+      const doc = new jsPDF({
+        orientation,
+        unit: 'px',
+        format: [raster.pixelWidth, raster.pixelHeight],
+        compress: true
+      });
+      const dataUrl = raster.canvas.toDataURL('image/png');
+      doc.addImage(dataUrl, 'PNG', 0, 0, raster.pixelWidth, raster.pixelHeight);
+      const blob = doc.output('blob');
+      await saveBlobToFile(blob, baseName + '.pdf', 'PDF document', { 'application/pdf': ['.pdf'] });
+      setStatus('Exported: ' + baseName + '.pdf', 'ok');
+    }
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      setStatus('Export canceled', '');
+    } else {
+      setStatus('Export error: ' + e.message, 'err');
+    }
+  }
+}
+
+// Reads the width/height bpmn-js's saveSVG() sets on the root <svg> element
+// from the current plane's own bounding box — zero for a genuinely empty
+// plane, otherwise the diagram's real size in its own coordinate units.
+function parseSvgDimensions(svgStr) {
+  const widthMatch = svgStr.match(/\swidth="([\d.]+)"/);
+  const heightMatch = svgStr.match(/\sheight="([\d.]+)"/);
+  return {
+    width: widthMatch ? parseFloat(widthMatch[1]) : 0,
+    height: heightMatch ? parseFloat(heightMatch[1]) : 0
+  };
+}
+
+// Renders an SVG string onto an offscreen <canvas>, sized to the SVG's own
+// width/height (as set by saveSVG() from its bounding box) times
+// EXPORT_RASTER_SCALE, clamped so neither dimension exceeds
+// EXPORT_MAX_DIMENSION_PX (scaling both sides down together to preserve the
+// aspect ratio if it would).
+function rasterizeSvgToCanvas(svgStr) {
+  return new Promise((resolve, reject) => {
+    const dims = parseSvgDimensions(svgStr);
+    let svgWidth = dims.width, svgHeight = dims.height;
+    // Callers are expected to have already rejected a genuinely empty plane
+    // (see exportCurrentView) — this fallback only guards against an
+    // unexpected/malformed saveSVG() result, not the empty-diagram case.
+    if (!svgWidth || !svgHeight) { svgWidth = svgWidth || 800; svgHeight = svgHeight || 600; }
+
+    let scale = EXPORT_RASTER_SCALE;
+    const largestSide = Math.max(svgWidth, svgHeight) * scale;
+    if (largestSide > EXPORT_MAX_DIMENSION_PX) {
+      scale = EXPORT_MAX_DIMENSION_PX / Math.max(svgWidth, svgHeight);
+    }
+    scale = Math.max(scale, 1);
+
+    const pixelWidth = Math.max(1, Math.round(svgWidth * scale));
+    const pixelHeight = Math.max(1, Math.round(svgHeight * scale));
+
+    const svgBlob = new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(svgBlob);
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = pixelWidth;
+      canvas.height = pixelHeight;
+      const ctx = canvas.getContext('2d');
+      // The SVG itself has a transparent background (diagram-js draws only
+      // shapes/connections, not a page backdrop) — fill with the same
+      // canvas background color the user sees on screen (Settings → Canvas
+      // background) so the export doesn't come out see-through.
+      ctx.fillStyle = (appColors && appColors.canvasBg) || '#ffffff';
+      ctx.fillRect(0, 0, pixelWidth, pixelHeight);
+      ctx.drawImage(img, 0, 0, pixelWidth, pixelHeight);
+      URL.revokeObjectURL(url);
+      resolve({ canvas, pixelWidth, pixelHeight });
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('Could not render the diagram to an image'));
+    };
+    img.src = url;
+  });
+}
+
+function canvasToPngBlob(canvas) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('Could not create PNG')), 'image/png');
+  });
+}
+
+// "<file name> - <sub-process/Call Activity target name>" for anything below
+// the main process, or just the file name at the top level — mirrors the
+// label already shown in the breadcrumb for whatever's currently on screen.
+function suggestedExportBaseName() {
+  const root = getCurrentRoot();
+  const base = currentFilename || 'diagram';
+  if (!root || !root.businessObject) return base;
+  const t = root.businessObject.$type;
+  if (t === 'bpmn:Process' || t === 'bpmn:Collaboration') return base;
+  return base + ' - ' + getBreadcrumbLabel(root);
+}
+
+function sanitizeFilename(name) {
+  return (name || 'diagram').replace(/[\\/:*?"<>|]+/g, '_').trim() || 'diagram';
+}
+
+// Shared by both export formats: native "Save as" picker when available
+// (Chromium — same mechanism the Save button already uses), falling back to
+// a plain download link elsewhere. Unlike Save, exports never reuse a
+// remembered file handle — each export asks where to put it.
+async function saveBlobToFile(blob, suggestedName, description, acceptMap) {
+  if (window.showSaveFilePicker) {
+    const handle = await window.showSaveFilePicker({
+      suggestedName,
+      types: [{ description, accept: acceptMap }]
+    });
+    const writable = await handle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+    return;
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = suggestedName;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
 /* ─── AUTO-ZAPIS: implementacja ─── */
 
 function scheduleAutosave() {
@@ -1290,7 +1507,7 @@ function updateAutosaveIndicator() {
     ? (autosaveEnabled
       ? 'Auto-save active — saving to file: ' + currentFileHandle.name
       : 'Auto-save is off')
-    : 'Auto-save turns on automatically after the first “Save .bpmn” or “Open…”';
+    : 'Auto-save turns on automatically after the first “Save” or “Open…”';
 }
 
 // Native browser warning when trying to close/refresh the page with unsaved changes —

@@ -22,7 +22,14 @@
   <input type="file" id="file-input" accept=".bpmn,.xml" style="display:none" onchange="openFile(event)">
   <span class="sep"></span>
   <input type="text" id="filename-input" value="diagram" placeholder="file name">
-  <button class="primary" onclick="saveDiagram()">Save .bpmn</button>
+  <button class="primary" onclick="saveDiagram()">Save</button>
+  <span style="position:relative;display:inline-block;">
+    <button id="export-toggle" onclick="toggleExportMenu(event)" title="Export the currently visible process (not the whole tree) as an image or PDF">Export ▾</button>
+    <div id="export-menu" style="display:none;">
+      <button onclick="exportCurrentView('png')">Export as PNG</button>
+      <button onclick="exportCurrentView('pdf')">Export as PDF</button>
+    </div>
+  </span>
   <button id="autosave-toggle" onclick="toggleAutosave()">Auto-save</button>
   <button id="extended-details-toggle" onclick="toggleExtendedDetails()">Extended</button>
   <span class="sep"></span>
@@ -116,6 +123,7 @@
 </div>
 
 <script src="./assets/vendor/bpmn-modeler.production.min.js"></script>
+<script src="./assets/vendor/jspdf.umd.min.js"></script>
 <script src="./assets/js/help-content.js"></script>
 <script src="./assets/js/app.js"></script>
 </body>

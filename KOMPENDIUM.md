@@ -29,7 +29,7 @@ Edytor diagramów BPMN 2.0 działający w 100% w przeglądarce, zbudowany na bib
 
 ### Obsługa plików
 
-- **New / Open… / Save .bpmn** — natywny wybór pliku (File System Access API), z fallbackiem do zwykłego pobierania pliku w przeglądarkach, które go nie obsługują.
+- **New / Open… / Save** — natywny wybór pliku (File System Access API), z fallbackiem do zwykłego pobierania pliku w przeglądarkach, które go nie obsługują.
 - Przeciągnięcie pliku `.bpmn` / `.xml` bezpośrednio na płótno też działa jako import.
 - **Auto-save** — ciche, opóźnione (debounced) zapisywanie zmian z powrotem do aktualnie otwartego pliku, ale tylko jeśli plik został otwarty lub zapisany przez natywne okno wyboru (nie przez przeciągnięcie).
 - Ostatnio otwarty plik jest zapamiętywany (uchwyt pliku w IndexedDB) i po ponownym wejściu na stronę wczytywany po cichu — albo, jeśli przeglądarka wymaga jawnego potwierdzenia dostępu, proponowany jednym kliknięciem w pasku narzędzi („Restore last file?”).
