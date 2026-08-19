@@ -1319,7 +1319,18 @@ async function exportCurrentView(format) {
       setStatus('Nothing to export — this view is empty', 'err');
       return;
     }
-    const raster = await rasterizeSvgToCanvas(svg);
+    // saveSVG() only ever serializes the diagram's own shapes/connections —
+    // dictionary badges and the details-link icon are separate HTML overlays
+    // diagram-js positions on top of the canvas (shown/hidden by the
+    // Extended details toggle), so without this the export would silently
+    // drop whatever's currently visible there. collectExportOverlays() reads
+    // them straight off the live DOM; widenSvgForOverlays() grows the
+    // exported SVG's own bounding box first (a badge can sit outside the
+    // plane's element bbox) so nothing gets clipped once drawn back in.
+    const overlays = collectExportOverlays();
+    const { svg: svgResized, viewBox } = widenSvgForOverlays(svg, overlays);
+    const raster = await rasterizeSvgToCanvas(svgResized);
+    drawExportOverlays(raster, overlays, viewBox);
     const baseName = sanitizeFilename(suggestedExportBaseName());
 
     if (format === 'png') {
@@ -1352,6 +1363,210 @@ async function exportCurrentView(format) {
       setStatus('Export error: ' + e.message, 'err');
     }
   }
+}
+
+// Reads every dict-badge / details-link overlay currently in the DOM (for
+// the current plane only, same as what's on screen — refreshDetailOverlays()
+// only ever populates these when Extended details is on) and converts each
+// one's on-screen pixel position/size back into the plane's own
+// model-coordinate space — the same space saveSVG()'s viewBox uses — via
+// the canvas's current zoom/scroll (canvas.viewbox()). That makes the
+// result independent of whatever the user happened to have panned/zoomed to
+// when exporting.
+//
+// These are deliberately NOT rendered by drawing the overlay HTML into an
+// <svg><foreignObject> and rasterizing that — Chromium permanently taints
+// any canvas a <foreignObject>-bearing SVG is drawn onto ("Tainted canvases
+// may not be exported"), which would break toBlob()/toDataURL() for the
+// rest of the export. drawExportOverlays() instead repaints each one with
+// plain Canvas2D primitives once the (untainted) diagram image is already
+// on the canvas.
+//
+// Returns null when nothing is visible to add, otherwise
+// { items: [{kind, x, y, width, height, ...}], bounds: {minX,minY,maxX,maxY} }
+// (x/y/width/height in model units).
+function collectExportOverlays() {
+  if (!modeler) return null;
+  const canvas = modeler.get('canvas');
+  const container = canvas.getContainer();
+  const containerRect = container.getBoundingClientRect();
+  if (!containerRect.width || !containerRect.height) return null;
+  const viewbox = canvas.viewbox();
+  const scale = viewbox.scale || 1;
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  const items = [];
+
+  function toModelRect(rect) {
+    return {
+      x: viewbox.x + (rect.left - containerRect.left) / scale,
+      y: viewbox.y + (rect.top - containerRect.top) / scale,
+      width: rect.width / scale,
+      height: rect.height / scale
+    };
+  }
+
+  container.querySelectorAll('.djs-overlay-dict-badge').forEach(ov => {
+    const span = ov.querySelector('.dict-badge-overlay');
+    const rect = ov.getBoundingClientRect();
+    if (!span || !rect.width || !rect.height) return;
+    const m = toModelRect(rect);
+    items.push({
+      kind: 'dict-badge',
+      x: m.x, y: m.y, width: m.width, height: m.height,
+      label: span.textContent || '',
+      bgColor: span.style.background || '#cce5ff',
+      textColor: span.style.color || '#222'
+    });
+    minX = Math.min(minX, m.x); minY = Math.min(minY, m.y);
+    maxX = Math.max(maxX, m.x + m.width); maxY = Math.max(maxY, m.y + m.height);
+  });
+
+  container.querySelectorAll('.djs-overlay-detail-link').forEach(ov => {
+    const rect = ov.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const m = toModelRect(rect);
+    items.push({ kind: 'detail-link', x: m.x, y: m.y, width: m.width, height: m.height });
+    minX = Math.min(minX, m.x); minY = Math.min(minY, m.y);
+    maxX = Math.max(maxX, m.x + m.width); maxY = Math.max(maxY, m.y + m.height);
+  });
+
+  if (!items.length) return null;
+  return { items, bounds: { minX, minY, maxX, maxY } };
+}
+
+// Widens a saveSVG() string's own width/height/viewBox (only if needed) so
+// that any overlay extending past the plane's element bounding box — a
+// badge below the bottom-most shape, a details-link icon above the topmost
+// one — has room to be drawn without being clipped by the SVG viewport.
+// Always returns the (possibly unchanged) viewBox alongside the svg string,
+// since drawExportOverlays() needs it to convert model coordinates to
+// pixels on the rasterized canvas.
+function widenSvgForOverlays(svgStr, overlaysInfo) {
+  const viewBoxMatch = svgStr.match(/viewBox="([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+)"/);
+  const vbX = viewBoxMatch ? parseFloat(viewBoxMatch[1]) : 0;
+  const vbY = viewBoxMatch ? parseFloat(viewBoxMatch[2]) : 0;
+  const vbW = viewBoxMatch ? parseFloat(viewBoxMatch[3]) : parseSvgDimensions(svgStr).width;
+  const vbH = viewBoxMatch ? parseFloat(viewBoxMatch[4]) : parseSvgDimensions(svgStr).height;
+
+  if (!overlaysInfo) return { svg: svgStr, viewBox: { x: vbX, y: vbY, width: vbW, height: vbH } };
+
+  const { minX, minY, maxX, maxY } = overlaysInfo.bounds;
+  const newMinX = Math.min(vbX, minX);
+  const newMinY = Math.min(vbY, minY);
+  const newW = Math.max(vbX + vbW, maxX) - newMinX;
+  const newH = Math.max(vbY + vbH, maxY) - newMinY;
+
+  if (newMinX === vbX && newMinY === vbY && newW === vbW && newH === vbH) {
+    return { svg: svgStr, viewBox: { x: vbX, y: vbY, width: vbW, height: vbH } };
+  }
+  const out = svgStr
+    .replace(/\swidth="[\d.]+"/, ' width="' + newW + '"')
+    .replace(/\sheight="[\d.]+"/, ' height="' + newH + '"')
+    .replace(/viewBox="[-\d.]+ [-\d.]+ [-\d.]+ [-\d.]+"/, 'viewBox="' + newMinX + ' ' + newMinY + ' ' + newW + ' ' + newH + '"');
+  return { svg: out, viewBox: { x: newMinX, y: newMinY, width: newW, height: newH } };
+}
+
+// Paints collectExportOverlays()'s items directly onto the already-rasterized
+// export canvas, in the exact position/size they occupy on screen — see
+// collectExportOverlays() for why this uses Canvas2D primitives rather than
+// compositing HTML/SVG.
+function drawExportOverlays(raster, overlaysInfo, viewBox) {
+  if (!overlaysInfo || !viewBox || !viewBox.width) return;
+  const ctx = raster.canvas.getContext('2d');
+  const pixelScale = raster.pixelWidth / viewBox.width;
+
+  overlaysInfo.items.forEach(item => {
+    const px = (item.x - viewBox.x) * pixelScale;
+    const py = (item.y - viewBox.y) * pixelScale;
+    const pw = item.width * pixelScale;
+    const ph = item.height * pixelScale;
+    if (item.kind === 'dict-badge') drawExportDictBadge(ctx, px, py, pw, ph, item, pixelScale);
+    else if (item.kind === 'detail-link') drawExportDetailLink(ctx, px, py, pw, ph, pixelScale);
+  });
+}
+
+function exportRoundRectPath(ctx, x, y, w, h, r) {
+  r = Math.max(0, Math.min(r, w / 2, h / 2));
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+// Greedy word-wrap identical in spirit to the CSS the on-screen badge uses
+// (white-space: normal / word-break: break-word) — not pixel-identical to
+// the browser's own line breaking, but visually equivalent for the short
+// labels dictionary items actually have.
+function exportWrapText(ctx, text, maxWidth) {
+  const words = String(text).split(/\s+/).filter(Boolean);
+  if (!words.length) return [''];
+  const lines = [];
+  let current = words[0];
+  for (let i = 1; i < words.length; i++) {
+    const test = current + ' ' + words[i];
+    if (ctx.measureText(test).width <= maxWidth) current = test;
+    else { lines.push(current); current = words[i]; }
+  }
+  lines.push(current);
+  return lines;
+}
+
+// Replicates the .dict-badge-overlay CSS (assets/css/app.css): rounded
+// colored pill, centered bold text, soft drop shadow.
+function drawExportDictBadge(ctx, px, py, pw, ph, item, pixelScale) {
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.25)';
+  ctx.shadowBlur = 3 * pixelScale;
+  ctx.shadowOffsetY = 1 * pixelScale;
+  ctx.fillStyle = item.bgColor;
+  exportRoundRectPath(ctx, px, py, pw, ph, 4 * pixelScale);
+  ctx.fill();
+  ctx.restore();
+
+  const fontSize = 10 * pixelScale;
+  ctx.fillStyle = item.textColor;
+  ctx.font = '600 ' + fontSize + 'px Arial, Helvetica, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const paddingX = 7 * pixelScale;
+  const maxTextWidth = Math.max(1, pw - paddingX * 2);
+  const lines = exportWrapText(ctx, item.label, maxTextWidth);
+  const lineHeight = fontSize * 1.4;
+  const startY = py + ph / 2 - ((lines.length - 1) * lineHeight) / 2;
+  lines.forEach((line, i) => {
+    ctx.fillText(line, px + pw / 2, startY + i * lineHeight, maxTextWidth);
+  });
+}
+
+// Replicates the .detail-link-overlay CSS: filled circle, white ring, "↗".
+function drawExportDetailLink(ctx, px, py, pw, ph, pixelScale) {
+  const cx = px + pw / 2, cy = py + ph / 2, r = Math.min(pw, ph) / 2;
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.3)';
+  ctx.shadowBlur = 3 * pixelScale;
+  ctx.shadowOffsetY = 1 * pixelScale;
+  ctx.fillStyle = '#1a6bb5';
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  const ringWidth = 2 * pixelScale;
+  ctx.lineWidth = ringWidth;
+  ctx.strokeStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(cx, cy, Math.max(0, r - ringWidth / 2), 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.fillStyle = '#fff';
+  ctx.font = (12 * pixelScale) + 'px Arial, Helvetica, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('↗', cx, cy + 0.5 * pixelScale);
 }
 
 // Reads the width/height bpmn-js's saveSVG() sets on the root <svg> element
