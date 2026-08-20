@@ -736,6 +736,25 @@
       pointer-events: none;
     }
 
+    /* Time analysis (Settings toggle) — Time (s) label to the right of a
+       task/sub-process/Call Activity, and the % split label near a sequence
+       flow's exit from an Exclusive gateway. Same styling for both, per
+       spec: black, bold, no background. */
+    .time-duration-overlay {
+      font-size: 11px;
+      font-weight: 700;
+      color: #111;
+      white-space: nowrap;
+      pointer-events: none;
+    }
+
+    /* bpmn-js's own native "enter collapsed sub-process" button — replaced
+       everywhere by refreshEnterOverlays()'s .detail-link-overlay-styled ↘
+       icon (see app.js) for a consistent look with the rest of this app's
+       icons, so the native one is hidden rather than left showing doubled
+       up alongside ours. */
+    .bjs-drilldown { display: none !important; }
+
     /* Help dialog body (see openHelp() in app.js) */
     .help-content { font-size: 13px; line-height: 1.6; color: #333; }
     .help-content h3 {

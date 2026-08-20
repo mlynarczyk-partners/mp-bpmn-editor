@@ -737,6 +737,12 @@ function findPathToSubprocess(targetBo) {
 const RESIZABLE_TASK_TYPES = ['bpmn:Task', 'bpmn:UserTask', 'bpmn:ServiceTask', 'bpmn:ManualTask',
   'bpmn:ScriptTask', 'bpmn:BusinessRuleTask', 'bpmn:SendTask', 'bpmn:ReceiveTask', 'bpmn:CallActivity'];
 
+// Elements that get a manual "Time (s)" field when Time analysis is enabled
+// in Settings — task-like shapes plus sub-processes/Call Activities (which
+// get a single, non-decomposed value, mirroring how PNG export treats each
+// plane independently — see TIME_ANALYSIS notes near refreshDetailOverlays).
+const TIME_FIELD_TYPES = RESIZABLE_TASK_TYPES.concat(['bpmn:SubProcess', 'bpmn:AdHocSubProcess']);
+
 // Floor for manual width/height entry in the properties panel — calling
 // modeling.resizeShape() directly (as opposed to dragging a resize handle)
 // bypasses bpmn-js's own interactive min-size clamping, so without this a
@@ -1542,7 +1548,7 @@ function drawExportDictBadge(ctx, px, py, pw, ph, item, pixelScale) {
   });
 }
 
-// Replicates the .detail-link-overlay CSS: filled circle, white ring, "↗".
+// Replicates the .detail-link-overlay CSS: filled circle, white ring, globe icon.
 function drawExportDetailLink(ctx, px, py, pw, ph, pixelScale) {
   const cx = px + pw / 2, cy = py + ph / 2, r = Math.min(pw, ph) / 2;
   ctx.save();
@@ -1562,11 +1568,22 @@ function drawExportDetailLink(ctx, px, py, pw, ph, pixelScale) {
   ctx.arc(cx, cy, Math.max(0, r - ringWidth / 2), 0, Math.PI * 2);
   ctx.stroke();
 
-  ctx.fillStyle = '#fff';
-  ctx.font = (12 * pixelScale) + 'px Arial, Helvetica, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText('↗', cx, cy + 0.5 * pixelScale);
+  // Globe icon — circle + one vertical meridian ellipse + one horizontal
+  // equator line, matching GLOBE_ICON_SVG used on-screen (see notes there).
+  const iconR = r * 0.63;
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1.1 * pixelScale;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.arc(cx, cy, iconR, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, iconR * 0.47, iconR, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx - iconR, cy);
+  ctx.lineTo(cx + iconR, cy);
+  ctx.stroke();
 }
 
 // Reads the width/height bpmn-js's saveSVG() sets on the root <svg> element
@@ -1913,13 +1930,31 @@ function loadMetaFromModel() {
    "System" assigned get a colored badge below the bottom-left corner. */
 
 // Icon size (must match width/height of .detail-link-overlay in CSS) and the
-// gap from the element's top edge, so the icon never overlaps the shape.
-// Note on bpmn-js math: "right" in an overlay's position is measured from the
-// LEFT edge of the element going right, so to line up the icon's right edge
-// with the element's right edge, "right" must equal the icon's own width
-// (not 0, and not a negative number).
+// gap used on both axes around it, so it sits just outside the element's
+// corner rather than flush against an edge — diagonally clear of it, the
+// same way the two corner icons (globe above, ↘ enter-arrow below) stay
+// clear of any edge-aligned label (Time-duration, dict badges, ...) instead
+// of competing with them for the same strip of space.
+// Note on bpmn-js math: "right"/"bottom" in an overlay's position are
+// measured from the element's OWN left/top edge going outward, so a
+// positive value of X pixels moves the icon X pixels INSIDE the element
+// (e.g. right: SIZE lines the icon up flush with the right edge); a
+// NEGATIVE value moves it that many pixels OUTSIDE the edge instead — which
+// is what places these icons past the corner rather than on top of it.
 const DETAIL_OVERLAY_SIZE = 20;
-const DETAIL_OVERLAY_GAP = 6;
+const DETAIL_OVERLAY_GAP = 3;
+
+// "Extra info / URL" icon — a plain globe (circle + one meridian ellipse +
+// one equator line), monochrome so it reads clearly at 20px and doesn't
+// depend on an emoji font being installed (unlike e.g. "🌐", which can
+// render as a missing-glyph box in some environments). Kept distinct from
+// the Call Activity "enter subprocess" arrow below so the two affordances
+// aren't confused with each other.
+const GLOBE_ICON_SVG = `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#fff" stroke-width="1.3" stroke-linecap="round">
+  <circle cx="8" cy="8" r="6.3"/>
+  <ellipse cx="8" cy="8" rx="3" ry="6.3"/>
+  <line x1="1.8" y1="8" x2="14.2" y2="8"/>
+</svg>`;
 
 // Gap between the element's bottom edge and the system badge below it.
 const SYSTEM_BADGE_GAP = 6;
@@ -1943,6 +1978,11 @@ const LOCATION_OVERLAY_TOP_CORRECTION = 2;
 // once the label would be wider than this fraction of the element's own
 // width, instead of overflowing sideways.
 const DICT_BADGE_MAX_WIDTH_RATIO = 0.75;
+
+// Gap between an element's right edge and its Time-duration label (same
+// convention as DETAIL_OVERLAY_GAP/SYSTEM_BADGE_GAP above), and between a
+// sequence flow's exit point and its % label.
+const TIME_OVERLAY_GAP = 6;
 
 // Renders an identical, invisible probe badge to find out how tall it will
 // actually be (1 line vs. wrapped 2 lines) for a given label + max-width,
@@ -2003,7 +2043,14 @@ const NO_COLOR_TYPES = ['bpmn:SequenceFlow', 'bpmn:MessageFlow', 'bpmn:Associati
 let extendedDetailsEnabled = false;
 try { extendedDetailsEnabled = localStorage.getItem('bpmnEditor.extendedDetails') === '1'; } catch(e) {}
 let detailOverlayIds = [];
-let callActivityOverlayIds = [];
+let enterOverlayIds = [];
+
+// Time analysis (Settings toggle) — v1 scope is fields + on-canvas display
+// only, no calculation engine. Independent of extendedDetailsEnabled: both
+// are checked separately inside the same refreshDetailOverlays() loop.
+let timeAnalysisEnabled = false;
+try { timeAnalysisEnabled = localStorage.getItem('bpmnEditor.timeAnalysis') === '1'; } catch(e) {}
+let timeOverlayIds = [];
 
 function toggleExtendedDetails() {
   extendedDetailsEnabled = !extendedDetailsEnabled;
@@ -2022,68 +2069,142 @@ function updateExtendedDetailsButton() {
     : 'Extended details are off';
 }
 
-// Call Activities never get bpmn-js's own native "drilldown" arrow overlay —
-// that built-in affordance (see _canDrillDown in the vendor bundle) is
-// hard-wired to bpmn:SubProcess only, regardless of whether a Call Activity
-// has a calledElement set. So we draw our own, reusing the exact same
-// markup/CSS-class/position bpmn-js uses for its native arrow (extracted
-// from the vendor bundle) so it's visually indistinguishable. Unlike the
+// Toggling off hides Time-analysis fields/overlays but does NOT clear the
+// underlying 'time'/'probability' meta values — same behavior as Extended
+// details above, so re-enabling restores everything as it was.
+function toggleTimeAnalysis() {
+  timeAnalysisEnabled = !timeAnalysisEnabled;
+  try { localStorage.setItem('bpmnEditor.timeAnalysis', timeAnalysisEnabled ? '1' : '0'); } catch(e) {}
+  refreshDetailOverlays();
+  if (modeler) updatePropsPanel(modeler.get('selection').get());
+}
+
+// "Enter" arrow for anything you can drill down into: Call Activities (which
+// never get bpmn-js's own native "drilldown" arrow overlay at all — that
+// built-in affordance, see _canDrillDown in the vendor bundle, is hard-wired
+// to bpmn:SubProcess only, regardless of whether a Call Activity has a
+// calledElement set) AND real collapsed bpmn:SubProcess/AdHocSubProcess
+// elements (which DO get a native one, but styled as bpmn-js's own big
+// square arrow button — visually heavier/less consistent with the rest of
+// this app's icons). Both cases get the exact same small blue-circle
+// treatment as the "extra info" globe icon above, mirrored to the
+// bottom-right corner with the same gap/size convention, with a ↘ arrow
+// instead of the globe so the two affordances ("open a URL" vs. "enter this
+// element") aren't confused with each other. The native square button for
+// SubProcess/AdHocSubProcess is hidden via CSS (.bjs-drilldown in
+// app.css) so it doesn't show up doubled alongside ours. Unlike the
 // System/Location/Device badges below, this must stay visible regardless of
 // the Extended-details toggle — it's core navigation, not an optional
 // detail — so it's a separate always-on overlay set, refreshed from inside
 // refreshDetailOverlays() (which already runs at every point the current
 // plane's contents can change) rather than gated by it.
-function refreshCallActivityOverlays() {
+function refreshEnterOverlays() {
   if (!modeler) return;
   const overlays = modeler.get('overlays');
 
-  callActivityOverlayIds.forEach(id => { try { overlays.remove(id); } catch(e) {} });
-  callActivityOverlayIds = [];
+  enterOverlayIds.forEach(id => { try { overlays.remove(id); } catch(e) {} });
+  enterOverlayIds = [];
 
   const planes = modeler.get('canvas')._planes || [];
+
+  function addEnterOverlay(el, targetId, isEmpty, title, navigateCall) {
+    try {
+      const overlayId = overlays.add(el, 'enter-overlay', {
+        position: { bottom: -DETAIL_OVERLAY_GAP, right: -DETAIL_OVERLAY_GAP },
+        html: `<a class="detail-link-overlay" href="#" title="Open ${title}"
+          style="${isEmpty ? 'opacity:0.55;' : ''}"
+          onmousedown="event.stopPropagation()" onclick="event.preventDefault();${navigateCall}">↘</a>`
+      });
+      enterOverlayIds.push(overlayId);
+    } catch(e) {
+      // element may not have its own graphical representation — skip
+    }
+  }
 
   getElementsInCurrentPlane().forEach(el => {
     if (el.labelTarget) return;
     const bo = el.businessObject;
-    if (!bo || bo.$type !== 'bpmn:CallActivity') return;
-    const targetId = bo.calledElement;
-    if (!targetId) return;
-    const targetPlane = planes.find(p => p.rootElement && p.rootElement.businessObject &&
-      p.rootElement.businessObject.id === targetId);
-    if (!targetPlane) return; // target missing/deleted — no arrow to show
+    if (!bo) return;
 
-    try {
+    if (bo.$type === 'bpmn:CallActivity') {
+      const targetId = bo.calledElement;
+      if (!targetId) return;
+      const targetPlane = planes.find(p => p.rootElement && p.rootElement.businessObject &&
+        p.rootElement.businessObject.id === targetId);
+      if (!targetPlane) return; // target missing/deleted — no arrow to show
       const targetBo = targetPlane.rootElement.businessObject;
       const isEmpty = !(targetBo.flowElements && targetBo.flowElements.length);
-      const title = escHtml(targetBo.name || targetId);
-      const overlayId = overlays.add(el, 'call-activity-drilldown', {
-        position: { bottom: -7, right: -8 },
-        html: `<button type="button" class="bjs-drilldown${isEmpty ? ' bjs-drilldown-empty' : ''}"
-          title="Open ${title}" onmousedown="event.stopPropagation()"
-          onclick="treeNavigateToCallActivity('${escHtml(el.id)}')">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 16 16">
-            <path fill-rule="evenodd" d="M4.81801948,3.50735931 L10.4996894,9.1896894 L10.5,4 L12,4 L12,12 L4,12 L4,10.5 L9.6896894,10.4996894 L3.75735931,4.56801948 C3.46446609,4.27512627 3.46446609,3.80025253 3.75735931,3.50735931 C4.05025253,3.21446609 4.52512627,3.21446609 4.81801948,3.50735931 Z"/>
-          </svg>
-        </button>`
-      });
-      callActivityOverlayIds.push(overlayId);
-    } catch(e) {
-      // element may not have its own graphical representation — skip
+      addEnterOverlay(el, targetId, isEmpty, escHtml(targetBo.name || targetId),
+        `treeNavigateToCallActivity('${escHtml(el.id)}')`);
+    } else if ((bo.$type === 'bpmn:SubProcess' || bo.$type === 'bpmn:AdHocSubProcess') && el.collapsed) {
+      const isEmpty = !(bo.flowElements && bo.flowElements.length);
+      addEnterOverlay(el, bo.id, isEmpty, escHtml(bo.name || bo.id),
+        `treeNavigateTo('${escHtml(el.id)}')`);
     }
   });
+}
+
+// Approx. rendered size of the flow-probability/time-duration label (11px
+// bold, single line, a couple of digits + "%") — used below to make sure the
+// label's own NEAR edge clears the line by TIME_OVERLAY_GAP, not just its
+// anchor point (an overlay's "top"/"left" position is its top-left corner,
+// not its center — moving the corner away from the line by exactly GAP only
+// works when the label extends AWAY from the line on that axis; when it
+// extends TOWARDS the line instead, the offset has to cover the label's own
+// width/height too, or the label still overlaps it).
+const FLOW_LABEL_APPROX_WIDTH = 28;
+const FLOW_LABEL_APPROX_HEIGHT = 15;
+
+// Positions a small label near a sequence flow's exit point out of its
+// source gateway. Connections don't carry a usable .x/.y/.width/.height (see
+// notes at the top of this section), so the bbox has to be computed by hand
+// from the waypoints, and the anchor is interpolated 35% along the first
+// waypoint segment (rather than sitting exactly at the gateway corner) so
+// that two closely-spaced outgoing flows don't produce overlapping labels.
+// The label is then pushed off the line itself, perpendicular to its actual
+// direction (not just "upward", which used to leave it sitting right on top
+// of a vertical/diagonal line) by the same gap the Time-duration label uses
+// next to a task.
+function flowExitOverlayPosition(flowEl) {
+  const wps = flowEl.waypoints;
+  if (!wps || wps.length < 1) return null;
+  const p0 = wps[0], p1 = wps[1] || wps[0];
+  const dx = p1.x - p0.x, dy = p1.y - p0.y;
+  const len = Math.sqrt(dx * dx + dy * dy) || 1;
+  const t = 0.35;
+  const anchor = { x: p0.x + dx * t, y: p0.y + dy * t };
+  // Perpendicular unit vector. bpmn-js's own connection NAME label (e.g.
+  // "Yes"/"No") sits above a mostly-horizontal flow and to the right of a
+  // mostly-vertical one — rotating the OTHER way here (below/left instead)
+  // keeps our % badge from landing on top of that name label, on top of
+  // just clearing the line itself.
+  const perpX = -dy / len, perpY = dx / len;
+  // Moving right/down lands the label's near (top-left) edge directly GAP
+  // away from the line — no extra correction needed. Moving left/up lands
+  // the label's FAR edge there instead, so the near edge (right/bottom) is
+  // only GAP away once the offset also covers the label's own width/height.
+  const offsetX = perpX >= 0 ? perpX * TIME_OVERLAY_GAP : perpX * (TIME_OVERLAY_GAP + FLOW_LABEL_APPROX_WIDTH);
+  const offsetY = perpY >= 0 ? perpY * TIME_OVERLAY_GAP : perpY * (TIME_OVERLAY_GAP + FLOW_LABEL_APPROX_HEIGHT);
+  const gx = anchor.x + offsetX;
+  const gy = anchor.y + offsetY;
+  const bboxX = Math.min(...wps.map(w => w.x));
+  const bboxY = Math.min(...wps.map(w => w.y));
+  return { left: gx - bboxX, top: gy - bboxY };
 }
 
 function refreshDetailOverlays() {
   if (!modeler) return;
   const overlays = modeler.get('overlays');
 
-  refreshCallActivityOverlays();
+  refreshEnterOverlays();
 
   // Remove previous overlays — easier to rebuild from scratch than to diff.
   detailOverlayIds.forEach(id => { try { overlays.remove(id); } catch(e) {} });
   detailOverlayIds = [];
+  timeOverlayIds.forEach(id => { try { overlays.remove(id); } catch(e) {} });
+  timeOverlayIds = [];
 
-  if (!extendedDetailsEnabled) return;
+  if (!extendedDetailsEnabled && !timeAnalysisEnabled) return;
 
   // Only elements on the plane you're actually looking at — using the full
   // elementRegistry here previously leaked badges from a collapsed
@@ -2100,29 +2221,68 @@ function refreshDetailOverlays() {
     // shape's bounds, once anchored to the small label-only bounds.
     if (el.labelTarget) return;
     const bo = el.businessObject;
-    if (!bo || !bo.$type || DETAIL_FIELDS_EXCLUDED_TYPES.includes(bo.$type)) return;
+    if (!bo || !bo.$type) return;
 
-    const url = (getElementMeta(bo, 'details') || '').trim();
-    if (url) {
-      try {
-        const overlayId = overlays.add(el, 'detail-link', {
-          position: { top: -(DETAIL_OVERLAY_GAP + DETAIL_OVERLAY_SIZE), right: DETAIL_OVERLAY_SIZE },
-          html: `<a class="detail-link-overlay" href="${escHtml(url)}" target="_blank" rel="noopener"
-            title="${escHtml(url)}" onmousedown="event.stopPropagation()">↗</a>`
-        });
-        detailOverlayIds.push(overlayId);
-      } catch(e) {
-        // element may not have its own graphical representation (e.g. process root) — skip
+    if (extendedDetailsEnabled && !DETAIL_FIELDS_EXCLUDED_TYPES.includes(bo.$type)) {
+      const url = (getElementMeta(bo, 'details') || '').trim();
+      if (url) {
+        try {
+          const overlayId = overlays.add(el, 'detail-link', {
+            position: { top: -(DETAIL_OVERLAY_GAP + DETAIL_OVERLAY_SIZE), right: -DETAIL_OVERLAY_GAP },
+            html: `<a class="detail-link-overlay" href="${escHtml(url)}" target="_blank" rel="noopener"
+              title="${escHtml(url)}" onmousedown="event.stopPropagation()">${GLOBE_ICON_SVG}</a>`
+          });
+          detailOverlayIds.push(overlayId);
+        } catch(e) {
+          // element may not have its own graphical representation (e.g. process root) — skip
+        }
       }
+
+      // Element width (model units, same coordinate space diagram-js uses for
+      // overlay positioning) — badges wrap once their label would be wider
+      // than DICT_BADGE_MAX_WIDTH_RATIO of this.
+      const elWidth = el.width || 100;
+      const maxWidthPx = elWidth * DICT_BADGE_MAX_WIDTH_RATIO;
+
+      detailOverlayIds.push(...renderDictBadgesForElement(el, bo, maxWidthPx, overlays));
     }
 
-    // Element width (model units, same coordinate space diagram-js uses for
-    // overlay positioning) — badges wrap once their label would be wider
-    // than DICT_BADGE_MAX_WIDTH_RATIO of this.
-    const elWidth = el.width || 100;
-    const maxWidthPx = elWidth * DICT_BADGE_MAX_WIDTH_RATIO;
+    if (timeAnalysisEnabled) {
+      // Manual duration on tasks/sub-processes/Call Activities — displayed to
+      // the right of the shape, top-aligned with a standard gap, same font
+      // treatment as the flow-probability label below.
+      if (TIME_FIELD_TYPES.includes(bo.$type)) {
+        const timeVal = (getElementMeta(bo, 'time') || '').trim();
+        if (timeVal !== '') {
+          try {
+            const elWidth = el.width || 100;
+            const overlayId = overlays.add(el, 'time-duration', {
+              position: { top: 0, left: elWidth + TIME_OVERLAY_GAP },
+              html: `<span class="time-duration-overlay">${escHtml(timeVal)}s</span>`
+            });
+            timeOverlayIds.push(overlayId);
+          } catch(e) {}
+        }
+      }
 
-    detailOverlayIds.push(...renderDictBadgesForElement(el, bo, maxWidthPx, overlays));
+      // % split label near where a flow exits an Exclusive gateway.
+      if (bo.$type === 'bpmn:SequenceFlow' && el.waypoints && bo.sourceRef &&
+          bo.sourceRef.$type === 'bpmn:ExclusiveGateway') {
+        const pct = (getElementMeta(bo, 'probability') || '').trim();
+        if (pct !== '') {
+          const pos = flowExitOverlayPosition(el);
+          if (pos) {
+            try {
+              const overlayId = overlays.add(el, 'flow-probability', {
+                position: pos,
+                html: `<span class="time-duration-overlay">${escHtml(pct)}%</span>`
+              });
+              timeOverlayIds.push(overlayId);
+            } catch(e) {}
+          }
+        }
+      }
+    }
   });
 }
 
@@ -2842,6 +3002,13 @@ function renderSettingsDialogHtml() {
           ${renderAppColorRow('Grid lines — every 100px', 'gridMajor')}
           ${renderAppColorRow(`Grid lines — every ${smallGridSize}px`, 'gridMinor')}
         </div>
+
+        <div style="${sectionLabel}">Time analysis</div>
+        <div style="font-size:11px;color:#aaa;margin-bottom:8px;">Adds a "Time" field (seconds) to tasks/sub-processes/Call Activities, and a % split for each XOR gateway's outgoing paths — shown on canvas as small labels next to each. Fields only for now, no calculation yet.</div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" id="time-analysis-toggle" ${timeAnalysisEnabled ? 'checked' : ''} onchange="toggleTimeAnalysis()">
+          Enable time analysis fields
+        </label>
       </div>
 
     </div>
@@ -3042,6 +3209,55 @@ function applyElementSize(elementId) {
     height: newHeight
   });
   refreshDetailOverlays();
+}
+
+// Manual duration field (Time analysis, v1 — storage + overlay only, no
+// calculation). Stored via the generic meta system, same as Description/
+// Details, so it round-trips through bpmn:Documentation for free.
+function applyElementTime(elementId) {
+  const er = modeler.get('elementRegistry');
+  const el = er.get(elementId);
+  if (!el) return;
+  const input = document.getElementById('prop-time-' + elementId);
+  if (!input) return;
+
+  const val = input.value.trim();
+  if (val === '') {
+    setElementMeta(el.businessObject, 'time', '');
+  } else {
+    let num = parseInt(val, 10);
+    if (isNaN(num) || num < 0) num = 0;
+    setElementMeta(el.businessObject, 'time', String(num));
+    input.value = num;
+  }
+  flushMetaToModel();
+  refreshDetailOverlays();
+}
+
+// % share of an Exclusive gateway's outgoing flow, stored on the flow's own
+// businessObject (getElementMeta/setElementMeta work identically for
+// connections and shapes since both just key off businessObject.id).
+function applyFlowProbability(flowId) {
+  const er = modeler.get('elementRegistry');
+  const flowEl = er.get(flowId);
+  if (!flowEl || !flowEl.businessObject) return;
+  const input = document.getElementById('prop-flowpct-' + flowId);
+  if (!input) return;
+
+  const val = input.value.trim();
+  if (val === '') {
+    setElementMeta(flowEl.businessObject, 'probability', '');
+  } else {
+    let num = parseInt(val, 10);
+    if (isNaN(num)) num = 0;
+    num = Math.max(0, Math.min(100, num));
+    setElementMeta(flowEl.businessObject, 'probability', String(num));
+    input.value = num;
+  }
+  flushMetaToModel();
+  refreshDetailOverlays();
+  // Re-render the panel so the running "Suma: X%" indicator updates live.
+  updatePropsPanel(modeler.get('selection').get());
 }
 
 function setElementDictValue(elementId, dictId, valueId) {
@@ -3550,6 +3766,22 @@ function updatePropsPanel(selection) {
     html += buildColorPicker(id);
   }
 
+  // Time (s) — manual duration field shown only when Time analysis is
+  // enabled in Settings. Sub-processes/Call Activities get the same single
+  // field as a Task and ignore their own inner content (mirrors PNG export's
+  // per-plane scoping) — v1 has no calculation engine, this is storage +
+  // on-canvas display only.
+  if (timeAnalysisEnabled && TIME_FIELD_TYPES.includes(type)) {
+    const timeVal = getElementMeta(bo, 'time');
+    html += `<div class="prop-row" style="margin-top:10px;">
+      <div class="prop-name">Time (s)</div>
+      <input class="prop-input" type="number" min="0" step="1" style="width:100px;"
+        id="prop-time-${safeId}" value="${escHtml(timeVal)}" placeholder="—"
+        onblur="applyElementTime('${safeId}')"
+        onkeydown="if(event.key==='Enter'){this.blur();}">
+    </div>`;
+  }
+
   if (isCallActivity) {
     const target = bo.calledElement || '';
     const planes = modeler.get('canvas')._planes || [];
@@ -3565,6 +3797,41 @@ function updatePropsPanel(selection) {
     html += `<button class="prop-btn" onclick="convertToCallActivity('${escHtml(id)}')">Mark as Call Activity ⇒</button>`;
   } else if (isSubProcess) {
     html += `<button class="prop-btn" onclick="treeNavigateTo('${escHtml(id)}')">Enter subprocess ↗</button>`;
+  }
+
+  // Time analysis — % split of an Exclusive gateway's outgoing paths. Only
+  // XOR gateways get this (a percentage split of "which single path is
+  // taken" isn't meaningful for Parallel/Inclusive/EventBased/Complex).
+  // v1: no validation blocking a sum ≠ 100%, just a red/green indicator
+  // here in the panel (not on canvas, per explicit decision) — no default-%
+  // auto-fill either.
+  if (timeAnalysisEnabled && type === 'bpmn:ExclusiveGateway') {
+    const outgoingFlows = bo.outgoing || [];
+    if (outgoingFlows.length) {
+      let sum = 0;
+      const rows = outgoingFlows.map(flowBo => {
+        const val = getElementMeta(flowBo, 'probability');
+        const num = val === '' ? 0 : (parseInt(val, 10) || 0);
+        sum += num;
+        const label = flowBo.name || flowBo.id;
+        return `<div class="prop-row" style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:6px;">
+          <div class="prop-name" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escHtml(label)}">${escHtml(label)}</div>
+          <div style="display:flex;align-items:center;gap:4px;flex-shrink:0;">
+            <input class="prop-input" type="number" min="0" max="100" step="1" style="width:60px;"
+              id="prop-flowpct-${escHtml(flowBo.id)}" value="${escHtml(val)}" placeholder="0"
+              onblur="applyFlowProbability('${escHtml(flowBo.id)}')"
+              onkeydown="if(event.key==='Enter'){this.blur();}">
+            <span style="color:#999;font-size:11px;">%</span>
+          </div>
+        </div>`;
+      }).join('');
+      const sumColor = sum === 100 ? '#2e7d32' : '#c0392b';
+      html += `<div class="prop-row" style="margin-top:14px;">
+        <div class="prop-name" style="text-transform:uppercase;font-size:11px;letter-spacing:0.04em;color:#888;">Time analysis</div>
+      </div>
+      ${rows}
+      <div class="prop-row" style="margin-top:6px;font-size:11px;color:${sumColor};font-weight:600;">Suma: ${sum}%</div>`;
+    }
   }
 
   // Description and Details fields — for all elements with an id
