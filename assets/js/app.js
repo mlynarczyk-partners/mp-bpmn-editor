@@ -1112,7 +1112,24 @@ function initModeler() {
     hasUnsavedChanges = true;
     setStatus('Unsaved changes', '');
     if (xmlPanelVisible) await refreshXmlPanel();
+    // Copy/paste (and duplicate, and undo/redo of either) clones each
+    // element's businessObject — including the hidden bpmn:Documentation
+    // node our meta (System/Location/Device, Time, flow %, Details URL) is
+    // serialized into — but the NEW element's id was never loaded into
+    // window._bpmnMeta (that cache is only ever populated wholesale by
+    // loadMetaFromModel() on file import, or per-id by setElementMeta() as
+    // the user edits the properties panel). Without re-reading it here, a
+    // pasted copy's badges/overlays stay invisible — and its properties-
+    // panel fields read as empty — until something else happens to call
+    // loadMetaFromModel(), which today only happens by navigating to a
+    // different plane and back (root.set → refreshDetailOverlays(),
+    // rebuilt from whatever was already in memory). Reloading from the
+    // model on every command stays consistent with updateTree() below,
+    // which already does a full rebuild unconditionally here — this only
+    // runs once per finished (undoable) action, not per mouse-move.
+    loadMetaFromModel();
     updateTree();
+    refreshDetailOverlays();
     scheduleAutosave();
   });
 
