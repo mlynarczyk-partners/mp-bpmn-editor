@@ -849,13 +849,1482 @@ function MpTextAnnotationPalette(palette, create, elementFactory) {
 }
 MpTextAnnotationPalette.$inject = ['palette', 'create', 'elementFactory'];
 
+// ─── CHOREOGRAPHY (branch "choreography") ───
+//
+// Choreography Task is a real, working palette tool — draggable/clickable
+// via the same create.start() mechanism every built-in entry uses — with
+// its own renderer (header/body/footer bands, message envelopes, bold
+// labels; see MpChoreographyRenderer/MpEnvelopeRenderer below). It sits in
+// its own "Choreografia" section of the palette, assembled by
+// reorganizePaletteForChoreography() below. Sub-Choreography, Call
+// Choreography, and Conversation started out alongside it as exploratory
+// no-op placeholders and have since been dropped — see
+// KOMPENDIUM_GIT_BPMN.md section 10 for the open question of whether/how
+// to build those out for real.
+//
+// The icon (see .mp-chor-task in app.css) is a small monochrome SVG
+// applied via CSS mask (not background-image), specifically so it picks
+// up `currentColor` and matches the existing bpmn-icon-* glyphs' color and
+// hover behavior instead of standing out as a different, colored style.
+
+function MpChoreographyPalette(palette, create, elementFactory) {
+  function startCreateChoreographyTask(event) {
+    const shape = elementFactory.createShape({ type: 'bpmn:ChoreographyTask' });
+    create.start(event, shape);
+  }
+
+  // Sub-Choreography / Call Choreography / Conversation were exploratory
+  // no-op placeholders (see the file-level comment above) — dropped from
+  // the published palette entirely rather than just hidden via CSS, since
+  // there's nothing behind them to ship. Choreography Task is the one
+  // entry with a real renderer/behavior behind it, so it's the only one
+  // that ships.
+  const entries = {
+    'mp-choreography-task': {
+      group: 'mp-choreography',
+      className: 'mp-chor-icon mp-chor-task',
+      title: 'Create Choreography Task',
+      action: { click: startCreateChoreographyTask, dragstart: startCreateChoreographyTask }
+    }
+  };
+
+  // Priority is arbitrary but must be lower than the built-in provider's
+  // default (1000) and MpTextAnnotationPalette's (500), so this new
+  // "mp-choreography" group is always the *last* one merged into the
+  // palette's entries — see reorganizePaletteForChoreography() below for
+  // how it then gets moved into the middle of the visual layout.
+  palette.registerProvider(10, {
+    getPaletteEntries: function() {
+      return entries;
+    }
+  });
+}
+MpChoreographyPalette.$inject = ['palette', 'create', 'elementFactory'];
+
+// Small moddle extension so a Choreography Task can carry its own body/
+// footer text as real, namespaced XML attributes (mp:bodyText / mp:
+// footerText on the <bpmn:choreographyTask> element) instead of an
+// in-memory-only hack — this is the standard, spec-sanctioned way BPMN
+// tools add custom data (it's exactly the mechanism camunda-bpmn-moddle
+// uses for its own `camunda:` attributes), so it survives Save/Open and
+// round-trips through the XML panel correctly. The header re-uses the
+// standard `name` property — that one was always free, every BPMN element
+// has it.
+const MP_MODDLE_EXTENSION = {
+  name: 'MPChoreography',
+  uri: 'https://mlynarczyk-partners.com/schema/bpmn-mp',
+  prefix: 'mp',
+  xml: { tagAlias: 'lowerCase' },
+  types: [
+    {
+      name: 'ChoreographyTaskBands',
+      isAbstract: true,
+      extends: ['bpmn:ChoreographyTask'],
+      properties: [
+        { name: 'bodyText', isAttr: true, type: 'String' },
+        { name: 'footerText', isAttr: true, type: 'String' },
+        // true = header takes the band normally assigned to the footer
+        // (and vice versa) — see MpChoreographySwapContextPad below. Body
+        // is not part of the swap, it's always the same fixed color.
+        { name: 'colorsSwapped', isAttr: true, type: 'Boolean' },
+        // Bold markup for bodyText/footerText, same "<b>...</b>"-only
+        // convention as the generic mp:richLabel (which the header/name
+        // reuses directly, since every element already gets richLabel from
+        // the RichLabel extension below). Separate properties because a
+        // Choreography Task has three independently-editable texts, not one.
+        { name: 'bodyTextRich', isAttr: true, type: 'String' },
+        { name: 'footerTextRich', isAttr: true, type: 'String' }
+      ]
+    },
+    // A "message envelope" attached to a Choreography Task's header or
+    // footer — modeled as an ordinary bpmn:TextAnnotation (so it's a real,
+    // spec-valid element that imports/exports/undoes/copies exactly like
+    // any other annotation) marked with isEnvelope so MpEnvelopeRenderer
+    // below knows to draw it as an envelope icon instead of the default
+    // annotation box, and connected to its task via a plain bpmn:Association
+    // (bpmn-js already renders that as a dotted line with no arrowhead out
+    // of the box — see addChoreographyEnvelope). envelopeZone/
+    // envelopeTargetId aren't strictly needed for the association itself
+    // (that's a real connection with its own source/target refs) but let
+    // the renderer and the swap-color handler find "this envelope's color
+    // should track that task's header/footer" without walking connections.
+    {
+      name: 'EnvelopeMarker',
+      isAbstract: true,
+      extends: ['bpmn:TextAnnotation'],
+      properties: [
+        { name: 'isEnvelope', isAttr: true, type: 'Boolean' },
+        { name: 'envelopeZone', isAttr: true, type: 'String' }, // 'header' | 'footer'
+        { name: 'envelopeTargetId', isAttr: true, type: 'String' },
+        // Where the envelope's own label (its inherited bpmn:TextAnnotation
+        // `text`) is rendered relative to the small envelope icon — 'below'
+        // (default when unset) or 'side'. Never drawn ON TOP of the icon
+        // itself; see mpEnvelopeLabelRect()/MpEnvelopeRenderer below.
+        { name: 'envelopeLabelPosition', isAttr: true, type: 'String' }
+      ]
+    },
+    // Extends bpmn:BaseElement — the common ancestor of essentially every
+    // BPMN element — so richLabel is available on any element's name/label,
+    // not just one type. Holds a small self-contained string using ONLY
+    // "<b>...</b>" around bold spans (everything else HTML-escaped plain
+    // text) — never full HTML — produced/consumed by
+    // mpBuildRichLabel()/mpParseRichLabel() below. The plain spec-required
+    // name/text bpmn-js itself manages is left completely alone; this is a
+    // purely additive rendering hint, absent entirely on elements that were
+    // never bolded.
+    {
+      name: 'RichLabel',
+      isAbstract: true,
+      extends: ['bpmn:BaseElement'],
+      properties: [
+        { name: 'richLabel', isAttr: true, type: 'String' }
+      ]
+    }
+  ]
+};
+
+// ─── Partial bold support for direct-edited labels (any element) ───
+//
+// bpmn-js's built-in direct-editing box is a plain contenteditable <div> —
+// the browser's native Ctrl+B already visually bolds a selection while
+// editing, but bpmn-js's own commit path (Textbox#getValue) only ever reads
+// `.innerText`, discarding any markup. That's why bold visually disappears
+// the moment editing ends: nothing bpmn-js does ever looks at it again.
+//
+// This section captures the rich HTML alongside bpmn-js's own plain-text
+// commit and stores a small, self-contained string using ONLY "<b>...</b>"
+// around bold spans (mp:richLabel — see RichLabel above) as a SEPARATE
+// property. The plain name/text bpmn-js manages is left completely alone.
+// Rendering (further below, in the render.shape hook) is a post-process
+// step that surgically splits bpmn-js's own already-correctly-positioned
+// and already-wrapped <tspan> elements into bold/non-bold pieces, rather
+// than reimplementing bpmn-js's text layout (word-wrap, centering, line
+// height) from scratch — that hand-off is what keeps this safe to apply to
+// every element type instead of just the ones this app already has a
+// custom renderer for.
+function mpEscapeHtml(str) {
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// Splits any [start,end) range that spans a '\n' into the sub-ranges on
+// either side of it, dropping the newline character itself from every
+// range — see the call site in mpExtractBoldRanges for why.
+function mpExcludeNewlinesFromRanges(text, ranges) {
+  const result = [];
+  ranges.forEach(function([s, e]) {
+    let segStart = s;
+    for (let i = s; i < e; i++) {
+      if (text[i] === '\n') {
+        if (i > segStart) result.push([segStart, i]);
+        segStart = i + 1;
+      }
+    }
+    if (segStart < e) result.push([segStart, e]);
+  });
+  return result;
+}
+
+// Walks a contenteditable's live DOM (or a detached div parsed from a
+// stored richLabel string) and returns { text, ranges } — the flat text
+// content and a list of [start,end) character ranges that are bold.
+// Detected via actual computed font-weight rather than assuming a specific
+// tag, since different browsers can use <b>, <strong>, or inline styles for
+// the native execCommand('bold').
+function mpExtractBoldRanges(container) {
+  let text = '';
+  const ranges = [];
+  let curStart = null;
+
+  function isBold(node) {
+    let n = node.parentNode;
+    while (n && n !== container) {
+      if (n.nodeType === 1) {
+        if (n.tagName === 'B' || n.tagName === 'STRONG') return true;
+        const fw = n.style && n.style.fontWeight;
+        if (fw === 'bold' || (fw && parseInt(fw, 10) >= 600)) return true;
+      }
+      n = n.parentNode;
+    }
+    return false;
+  }
+
+  function walk(node) {
+    if (node.nodeType === 3) {
+      const bold = isBold(node);
+      if (bold && curStart === null) curStart = text.length;
+      if (!bold && curStart !== null) { ranges.push([curStart, text.length]); curStart = null; }
+      text += node.textContent;
+    } else if (node.nodeType === 1) {
+      if (node.tagName === 'BR') text += '\n';
+      Array.from(node.childNodes).forEach(walk);
+    }
+  }
+  Array.from(container.childNodes).forEach(walk);
+  if (curStart !== null) ranges.push([curStart, text.length]);
+  // A line break should never itself be "bold" — it's metadata about
+  // where lines split, not a rendered glyph. Left in, a selection that
+  // happens to extend exactly to a line's end (e.g. Shift+End, or a
+  // triple-click that selects through the trailing break) wraps the
+  // break INSIDE the <b>, so the stored richLabel carries a raw newline
+  // character inside its own tag content. That's harmless today (the
+  // newline is only ever used as a split point before word-wrapping, per
+  // mpRewrapWithBold below, never rendered as a character), but it's
+  // fragile — strip it here so ranges only ever span real text.
+  return { text, ranges: mpExcludeNewlinesFromRanges(text, ranges) };
+}
+
+// Trims the flat text the same way bpmn-js's own getValue() does
+// (`.innerText.trim()`), shifting/clipping bold ranges to match so the
+// stored richLabel's own text stays aligned with the plain name bpmn-js
+// commits alongside it.
+function mpTrimWithRanges(text, ranges) {
+  const leading = text.length - text.replace(/^\s+/, '').length;
+  const trimmed = text.trim();
+  const adjusted = ranges
+    .map(([s, e]) => [Math.max(0, s - leading), Math.max(0, Math.min(trimmed.length, e - leading))])
+    .filter(([s, e]) => e > s);
+  return { text: trimmed, ranges: adjusted };
+}
+
+function mpBuildRichLabel(text, ranges) {
+  if (!ranges.length) return null;
+  let out = '', pos = 0;
+  ranges.forEach(function([s, e]) {
+    out += mpEscapeHtml(text.slice(pos, s));
+    out += '<b>' + mpEscapeHtml(text.slice(s, e)) + '</b>';
+    pos = e;
+  });
+  out += mpEscapeHtml(text.slice(pos));
+  return out;
+}
+
+function mpParseRichLabel(richLabel) {
+  const div = document.createElement('div');
+  div.innerHTML = richLabel;
+  return mpExtractBoldRanges(div);
+}
+
+// Splits [lineStart,lineEnd) into contiguous bold/non-bold pieces against
+// the full set of bold ranges, using range boundaries that fall strictly
+// inside the line as split points.
+function mpSliceLineIntoPieces(flatText, ranges, lineStart, lineEnd) {
+  const boundaries = new Set([lineStart, lineEnd]);
+  ranges.forEach(function([s, e]) {
+    if (s > lineStart && s < lineEnd) boundaries.add(s);
+    if (e > lineStart && e < lineEnd) boundaries.add(e);
+  });
+  const sorted = Array.from(boundaries).sort(function(a, b) { return a - b; });
+  const pieces = [];
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const segStart = sorted[i], segEnd = sorted[i + 1];
+    if (segEnd <= segStart) continue;
+    const mid = (segStart + segEnd) / 2;
+    const bold = ranges.some(function([s, e]) { return s <= mid && mid < e; });
+    pieces.push({ text: flatText.slice(segStart, segEnd), bold: bold });
+  }
+  return pieces;
+}
+
+// Post-processes an already-rendered label's <text> element (one <tspan>
+// per line, or plain textContent for a single un-wrapped line) to apply
+// bold spans from a stored richLabel string, by matching each
+// already-rendered line against the stored flat text via substring search
+// (robust regardless of exactly how bpmn-js's word-wrap trimmed whitespace
+// at line breaks, since we search FOR the line's own exact rendered
+// characters, not the other way around) and, for a line that actually
+// overlaps a bold range, replacing its single <tspan> with several — using
+// the ORIGINAL tspan's own rendered start position
+// (SVGTextContentElement#getStartPositionOfChar) as the new run's anchor,
+// so the visual position/centering bpmn-js already computed is preserved
+// exactly instead of us reimplementing font metrics.
+//
+// This does NOT re-decide where lines break — it only recolors bpmn-js's
+// own existing line breaks. That's fine (and cheap/low-risk) for elements
+// with no real width constraint to respect — see mpApplyRichLabelBold()
+// below for when the fuller mpRewrapWithBold() is needed instead.
+function mpSpliceBoldIntoExistingLines(textEl, flatText, ranges) {
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  let searchPos = 0;
+
+  function replaceLine(lineNode, lineText, isDirectTextEl) {
+    if (!lineText) return;
+    const idx = flatText.indexOf(lineText, searchPos);
+    if (idx === -1) return; // couldn't confidently match — leave this line untouched
+    searchPos = idx + lineText.length;
+
+    const overlaps = ranges.some(function([s, e]) { return s < idx + lineText.length && e > idx; });
+    if (!overlaps) return;
+
+    let anchorX, anchorY;
+    try {
+      const pos = lineNode.getStartPositionOfChar(0);
+      anchorX = pos.x; anchorY = pos.y;
+    } catch (e) {
+      anchorX = parseFloat(lineNode.getAttribute('x')) || 0;
+      anchorY = parseFloat(lineNode.getAttribute('y')) || 0;
+    }
+
+    const pieces = mpSliceLineIntoPieces(flatText, ranges, idx, idx + lineText.length).filter(function(p) { return p.text; });
+    const newTspans = pieces.map(function(piece, i) {
+      const ts = document.createElementNS(SVG_NS, 'tspan');
+      if (i === 0) { ts.setAttribute('x', anchorX); ts.setAttribute('y', anchorY); }
+      if (piece.bold) ts.setAttribute('font-weight', 'bold');
+      ts.textContent = piece.text;
+      return ts;
+    });
+
+    if (isDirectTextEl) {
+      lineNode.textContent = '';
+      newTspans.forEach(function(ts) { lineNode.appendChild(ts); });
+    } else {
+      const parent = lineNode.parentNode;
+      newTspans.forEach(function(ts) { parent.insertBefore(ts, lineNode); });
+      parent.removeChild(lineNode);
+    }
+  }
+
+  const tspans = Array.from(textEl.querySelectorAll('tspan'));
+  if (tspans.length) {
+    tspans.forEach(function(tspan) { replaceLine(tspan, tspan.textContent, false); });
+  } else if (textEl.textContent) {
+    replaceLine(textEl, textEl.textContent, true);
+  }
+}
+
+// Fully re-wraps a label's text against its OWN element width, measuring
+// each word's ACTUAL rendered width (bold vs normal) with
+// SVGTextContentElement#getComputedTextLength — used instead of
+// mpSpliceBoldIntoExistingLines() above for anything with a real,
+// visible width to respect (a Task's inline label, a Text Annotation's
+// box, ...). Needed because bpmn-js's own word-wrap decided every line
+// break using NORMAL-weight metrics only; simply recoloring characters
+// bold afterward (the splice approach) can make a line render WIDER than
+// the box it's supposed to fit in — exactly the overflow bug this fixes.
+// Not used for external labels (gateways/events/flows) — see
+// mpApplyRichLabelBold() below for why.
+function mpRewrapWithBold(textEl, element, flatText, ranges) {
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const originalTspans = Array.from(textEl.querySelectorAll('tspan'));
+
+  function measure(str, bold) {
+    if (!str) return 0;
+    const ts = document.createElementNS(SVG_NS, 'tspan');
+    // Without this, SVG's default xml:space="default" whitespace handling
+    // collapses a tspan whose content is ENTIRELY whitespace down to
+    // nothing — getComputedTextLength() on a lone space returns exactly 0
+    // (confirmed empirically), even though that same space clearly takes
+    // up real width once it sits between two words. Since the greedy wrap
+    // below measures each space-run as its OWN token (to decide whether it
+    // fits before the next word), that made every space in a line count as
+    // ZERO width — understating a line's true rendered width by roughly
+    // (space width × word count), which is exactly what let long bold
+    // lines overflow their box: the wrap decision thought there was more
+    // room left than there actually was. xml:space="preserve" turns off
+    // that collapsing for this one measurement tspan.
+    ts.setAttributeNS('http://www.w3.org/XML/1998/namespace', 'xml:space', 'preserve');
+    if (bold) ts.setAttribute('font-weight', 'bold');
+    ts.textContent = str;
+    textEl.appendChild(ts);
+    let w = 0;
+    try { w = ts.getComputedTextLength(); } catch (e) {}
+    textEl.removeChild(ts);
+    return w;
+  }
+
+  // Geometry from bpmn-js's OWN original layout — line height, first
+  // line's y, and horizontal alignment mode — captured BEFORE we touch
+  // anything, so our replacement keeps matching its font metrics and
+  // vertical centering exactly. We only ever change how text wraps
+  // HORIZONTALLY, never anything vertical bpmn-js already decided.
+  let lineHeight = null;
+  if (originalTspans.length >= 2) {
+    const y0 = parseFloat(originalTspans[0].getAttribute('y'));
+    const y1 = parseFloat(originalTspans[1].getAttribute('y'));
+    if (isFinite(y0) && isFinite(y1) && y1 > y0) lineHeight = y1 - y0;
+  }
+  if (!lineHeight) {
+    const fontSize = parseFloat(window.getComputedStyle(textEl).fontSize) || 12;
+    lineHeight = fontSize * 1.2;
+  }
+  let startY;
+  if (originalTspans.length) startY = parseFloat(originalTspans[0].getAttribute('y'));
+  else startY = parseFloat(textEl.getAttribute('y'));
+  if (!isFinite(startY)) startY = 0;
+
+  // bpmn-js's own text layout util renders EVERY line with an explicit
+  // per-line x/y (computed once from a fixed `align` option) and never
+  // actually sets SVG text-anchor="middle" — so reading text-anchor off
+  // the DOM cannot tell centered text apart from left-aligned text; both
+  // come out as "start" with a precomputed x. The real signal is the
+  // `align` mode bpmn-js itself uses for this element type: TextAnnotation
+  // is drawn with align:"left-top" (fixed 7px padding), while everything
+  // else that reaches this function (Task/activity inline labels, etc.)
+  // is drawn with align:"center-middle" — confirmed against the bundled
+  // renderer source, not guessed from measurements.
+  const isTextAnnotation = element.type === 'bpmn:TextAnnotation';
+  const centered = !isTextAnnotation;
+  // bpmn-js draws SOME centered labels pre-rotated — a Participant/Lane's
+  // name on a horizontal container gets an explicit rotation transform
+  // directly on <text> so it reads vertically top-to-bottom. When that's
+  // present, the coordinate frame this function positions tspans in is
+  // NOT the element's own width/height: the "box" text centers against
+  // runs along the element's HEIGHT, not its width (confirmed
+  // empirically — a Participant's <text transform="matrix(...)"> lays
+  // out its x/y in a local frame where x spans the pool's height, not
+  // its width). Using element.width there unconditionally is exactly why
+  // bolding a pool's name previously sent it flying off — miles outside
+  // the actual box. Rather than hardcode which element types get
+  // rotated, detect it from the transform bpmn-js itself already put on
+  // textEl (untouched by clearing child tspans below — that's a
+  // child-node operation, not an attribute one, so it survives).
+  const rotatedLabel = centered && textEl.hasAttribute('transform');
+  const boxLength = rotatedLabel ? element.height : element.width;
+  // Derive the true box CENTER from bpmn-js's OWN just-rendered plain
+  // layout (still sitting in originalTspans at this point) instead of
+  // assuming boxLength/2 — this is what actually makes the rotated case
+  // work without needing to reverse-engineer bpmn-js's exact rotation
+  // matrix: bpmn-js already centered the ORIGINAL text correctly, so
+  // reading its resolved x plus half its own rendered width back out
+  // recovers the same center it used, regardless of orientation.
+  let boxCenterX = boxLength / 2;
+  if (centered && originalTspans.length) {
+    const firstLineY = originalTspans[0].getAttribute('y');
+    const firstLineTspans = [originalTspans[0]];
+    for (let i = 1; i < originalTspans.length; i++) {
+      if (originalTspans[i].getAttribute('y') === firstLineY) firstLineTspans.push(originalTspans[i]);
+      else break;
+    }
+    let firstLineWidth = 0;
+    firstLineTspans.forEach(function(ts) {
+      try { firstLineWidth += ts.getComputedTextLength(); } catch (e) {}
+    });
+    let firstLineX;
+    try { firstLineX = originalTspans[0].getStartPositionOfChar(0).x; } catch (e) {
+      firstLineX = parseFloat(originalTspans[0].getAttribute('x')) || 0;
+    }
+    if (firstLineWidth > 0) boxCenterX = firstLineX + firstLineWidth / 2;
+  }
+  // Left padding for LEFT-ALIGNED text (TextAnnotation only) — measured
+  // from the ORIGINAL first tspan's actual resolved start position, which
+  // matches bpmn-js's own fixed ~7px padding regardless of that line's
+  // content (left-aligned text always starts at the same x). Small
+  // constant fallback if measurement fails for any reason.
+  const TEXT_ANNOTATION_PADDING = 7;
+  const FALLBACK_SIDE_PADDING = 6;
+  let leftPad = TEXT_ANNOTATION_PADDING;
+  if (isTextAnnotation && originalTspans.length) {
+    try { leftPad = originalTspans[0].getStartPositionOfChar(0).x; } catch (e) {
+      leftPad = parseFloat(originalTspans[0].getAttribute('x')) || TEXT_ANNOTATION_PADDING;
+    }
+  }
+  const targetWidth = centered
+    ? Math.max(20, boxLength - FALLBACK_SIDE_PADDING * 2)
+    : Math.max(20, element.width - leftPad * 2);
+
+  // Tokenize into forced-break segments (on '\n', from Shift+Enter), then
+  // each segment into words/space-runs, each tagged with its bold state
+  // (checked at the token's own start offset) and pre-measured width.
+  const tokens = [];
+  let idx = 0;
+  flatText.split('\n').forEach(function(seg, i) {
+    if (i > 0) tokens.push({ forcedBreak: true });
+    let pos = idx;
+    seg.split(/(\s+)/).forEach(function(tok) {
+      if (tok) {
+        const bold = ranges.some(function(r) { return r[0] <= pos && pos < r[1]; });
+        tokens.push({ text: tok, bold: bold, width: measure(tok, bold), isSpace: /^\s+$/.test(tok) });
+      }
+      pos += tok.length;
+    });
+    idx = pos + 1; // +1 for the '\n' consumed by split
+  });
+
+  // Greedy word-wrap against targetWidth — never breaks a token mid-word.
+  const lines = [[]];
+  let curWidth = 0;
+  tokens.forEach(function(tok) {
+    if (tok.forcedBreak) { lines.push([]); curWidth = 0; return; }
+    const line = lines[lines.length - 1];
+    if (tok.isSpace && line.length === 0) return; // no leading space on a line
+    if (curWidth + tok.width > targetWidth && line.length > 0 && !tok.isSpace) {
+      lines.push([tok]);
+      curWidth = tok.width;
+    } else {
+      line.push(tok);
+      curWidth += tok.width;
+    }
+  });
+  // Drop a trailing space per line (cosmetic — matches how word-wrap
+  // normally consumes the space where the break occurred).
+  lines.forEach(function(line) {
+    while (line.length && line[line.length - 1].isSpace) line.pop();
+  });
+
+  // Rebuild: clear the <text> element and lay out fresh tspans per line.
+  // Each line's tokens are merged into contiguous bold/non-bold pieces
+  // (a line can still mix bold and plain words) — every piece after the
+  // first in a line flows naturally with no x of its own, and the line's
+  // OWN total width is measured up front so a centered line is offset by
+  // exactly half its own width, reproducing true per-line centering
+  // without relying on SVG's own per-tspan text-anchor (which only
+  // centers a single tspan's own text, not a multi-piece line).
+  while (textEl.firstChild) textEl.removeChild(textEl.firstChild);
+  if (textEl.hasAttribute('text-anchor')) textEl.setAttribute('text-anchor', 'start');
+
+  lines.forEach(function(line, i) {
+    const y = startY + i * lineHeight;
+
+    // Merge into contiguous bold/plain pieces.
+    const pieces = [];
+    line.forEach(function(tok) {
+      const last = pieces[pieces.length - 1];
+      if (last && last.bold === tok.bold) last.text += tok.text;
+      else pieces.push({ text: tok.text, bold: tok.bold });
+    });
+
+    if (!pieces.length) {
+      const empty = document.createElementNS(SVG_NS, 'tspan');
+      empty.setAttribute('x', centered ? boxCenterX : leftPad);
+      empty.setAttribute('y', y);
+      empty.setAttribute('text-anchor', 'start');
+      textEl.appendChild(empty);
+      return;
+    }
+
+    // Append the real tspans FIRST (with a placeholder x=0 on the first
+    // one), THEN measure their actual rendered widths and reposition —
+    // this measures the exact elements that stay in the DOM instead of
+    // separate throwaway copies, so it can't drift from the true layout
+    // (a pre-measure-then-append split previously left a few px of
+    // off-center bias on lines mixing bold and plain pieces, since
+    // summing independently-measured pieces doesn't always equal the
+    // width of those same pieces once they're actual DOM siblings).
+    const tspans = pieces.map(function(piece, pi) {
+      const ts = document.createElementNS(SVG_NS, 'tspan');
+      if (pi === 0) {
+        ts.setAttribute('x', 0);
+        ts.setAttribute('y', y);
+        ts.setAttribute('text-anchor', 'start');
+      }
+      if (piece.bold) ts.setAttribute('font-weight', 'bold');
+      ts.textContent = piece.text;
+      textEl.appendChild(ts);
+      return ts;
+    });
+
+    let lineWidth = 0;
+    tspans.forEach(function(ts) {
+      try { lineWidth += ts.getComputedTextLength(); } catch (e) {}
+    });
+    const x = centered ? (boxCenterX - lineWidth / 2) : leftPad;
+    tspans[0].setAttribute('x', x);
+  });
+
+  // bpmn-js auto-grows a TextAnnotation's height when its PLAIN text
+  // changes (getTextAnnotationBounds — see the direct-editing commit
+  // handler above) — but bolding only ever changes richLabel, never the
+  // plain text, so that auto-grow never fires for a bold-only edit. Left
+  // alone, bold text that needs an EXTRA wrapped line (bold glyphs are
+  // wider) just renders past the box's bottom edge with nothing to
+  // signal why, and manually resizing the note doesn't reliably fix it
+  // since there's no visual cue for exactly how much taller it needs to
+  // be. Grow it ourselves whenever this rewrap needs more room than the
+  // box currently has. Comparing against the ABSOLUTE required height
+  // (not a delta from the original line count) is what keeps this from
+  // looping: once grown, the very next render pass sees enough room
+  // already and does nothing further. Skipped for envelope labels, which
+  // deliberately keep a fixed size (see mpEnvelopeLabelRect/envelope
+  // direct-editing above) — not that envelopes currently support bold at
+  // all, but this keeps the two features from ever fighting if that
+  // changes.
+  if (isTextAnnotation) {
+    const bo = element.businessObject;
+    const isEnvelopeLabel = !!(bo && typeof bo.get === 'function' && bo.get('isEnvelope'));
+    if (!isEnvelopeLabel) {
+      const lastLineBaselineY = startY + (lines.length - 1) * lineHeight;
+      const neededHeight = Math.ceil(lastLineBaselineY + lineHeight * 0.5 + TEXT_ANNOTATION_PADDING);
+      if (neededHeight > element.height + 0.5) {
+        const growX = element.x, growY = element.y, growW = element.width;
+        setTimeout(function() {
+          modeler.get('modeling').resizeShape(element, { x: growX, y: growY, width: growW, height: neededHeight });
+        }, 0);
+      }
+    }
+  }
+}
+
+// Dispatches to whichever bold-rendering strategy fits this element — see
+// each function's own comment for why they're not interchangeable.
+function mpApplyRichLabelBold(gfx, element, richLabel) {
+  const textEl = gfx.querySelector('text');
+  if (!textEl) return;
+  const parsed = mpParseRichLabel(richLabel);
+  const flatText = parsed.text, ranges = parsed.ranges;
+  if (!ranges.length) return;
+
+  if (element.type === 'label') {
+    // External labels (gateways/events/flows/pools) have no visible
+    // background/border to overflow, and their own width was already
+    // auto-sized by bpmn-js to snugly fit the ORIGINAL plain text —
+    // forcing a width constraint here would force-wrap perfectly fine
+    // single-line labels for no visual benefit. Simple in-place recolor.
+    mpSpliceBoldIntoExistingLines(textEl, flatText, ranges);
+  } else {
+    mpRewrapWithBold(textEl, element, flatText, ranges);
+  }
+}
+
+// Shared geometry helpers — used by both MpChoreographyRenderer (drawing)
+// and MpChoreographyDirectEditing (hit-testing which band a dblclick landed
+// in, and sizing/positioning the inline text editor). Keeping this in one
+// place means the clickable band always matches the drawn band exactly.
+const MP_CHOR_CORNER_RADIUS = 10; // matches bpmn-js's own Task corner radius exactly (measured empirically)
+const MP_CHOR_BAND_HEIGHT = 40; // fixed header/footer band height, per explicit request — tall enough for wrapped text
+const MP_CHOR_COLOR_A = '#fbf3df'; // yellow
+const MP_CHOR_COLOR_B = '#eef4fa'; // blue
+const MP_CHOR_BODY_COLOR = MP_CHOR_COLOR_A; // body is always this color, not part of the header/footer swap
+const MP_ENVELOPE_WIDTH = 46;
+const MP_ENVELOPE_HEIGHT = 32;
+const MP_ENVELOPE_GAP = 26; // vertical gap between the task's edge and the envelope shape
+const MP_ENVELOPE_LABEL_WIDTH = 100;
+const MP_ENVELOPE_LABEL_GAP = 6; // gap between the icon's own box and its label
+
+// Where an envelope's label sits relative to its own small icon — used by
+// BOTH MpEnvelopeRenderer (drawing) and the envelope's direct-editing
+// overlay (sizing/positioning the editor), so the clickable/edited area
+// always matches what's actually drawn. Coordinates are element-local
+// (relative to the envelope shape's own x/y), matching how
+// mpChoreographyZoneRect works for choreography bands. 'below' is the
+// default when envelopeLabelPosition is unset — matches a real envelope's
+// caption convention (short text under the icon) and is what a brand new
+// envelope shows before anyone repositions it.
+function mpEnvelopeLabelRect(element) {
+  const w = element.width, h = element.height;
+  const bo = element.businessObject;
+  const pos = (bo && bo.get('envelopeLabelPosition')) || 'below';
+  if (pos === 'side') {
+    // valign 'middle': the box itself already spans symmetrically above and
+    // below the icon (see y/height below), but text content on its own
+    // flows from the TOP of a block — without an explicit vAlign the label
+    // would sit level with the icon's top edge instead of its center.
+    return { x: w + MP_ENVELOPE_LABEL_GAP, y: -6, width: MP_ENVELOPE_LABEL_WIDTH, height: h + 12, align: 'left', valign: 'middle' };
+  }
+  // "below" always means "in the direction AWAY from the choreography
+  // task", not literally underneath the icon — for a HEADER envelope
+  // (whose icon already sits above the task) that's actually ABOVE the
+  // icon; a FOOTER envelope (icon below the task) keeps literal "below".
+  // Either way this opens onto empty canvas, never into the narrow
+  // MP_ENVELOPE_GAP strip the icon itself sits in, so there's no longer any
+  // need to cap the height to avoid overlapping the task.
+  const zone = bo && bo.get('envelopeZone');
+  const gap = 4;
+  const height = 30;
+  if (zone === 'header') {
+    // Box sits ABOVE the icon — hug its BOTTOM edge (valign 'bottom') so the
+    // label stays right next to the icon regardless of text length, instead
+    // of flowing from the box's top and leaving a big gap above the icon.
+    return { x: (w - MP_ENVELOPE_LABEL_WIDTH) / 2, y: -gap - height, width: MP_ENVELOPE_LABEL_WIDTH, height: height, align: 'center', valign: 'bottom' };
+  }
+  // Box sits BELOW the icon — hug its TOP edge, the mirror image of above.
+  return { x: (w - MP_ENVELOPE_LABEL_WIDTH) / 2, y: h + gap, width: MP_ENVELOPE_LABEL_WIDTH, height: height, align: 'center', valign: 'top' };
+}
+
+// Maps mpEnvelopeLabelRect()'s 'top'|'bottom'|'middle' vAlign to the CSS
+// flex `justify-content` value that produces it — `.mp-envelope-label` and
+// `.mp-envelope-label-editor` are both flex columns (see app.css) precisely
+// so this single property can position their content vertically within a
+// box that's taller than the text itself, without needing to know the
+// text's own height in advance.
+function mpVAlignToJustifyContent(valign) {
+  if (valign === 'bottom') return 'flex-end';
+  if (valign === 'middle') return 'center';
+  return 'flex-start';
+}
+
+function mpChoreographyBandHeight(height) {
+  // Fixed 40px, like real participant bands — only shrinks below that if
+  // the whole shape is too short to fit two bands without a negative-height
+  // body (an edge case only reachable by manually shrinking the shape well
+  // below its normal size).
+  return height >= MP_CHOR_BAND_HEIGHT * 2 ? MP_CHOR_BAND_HEIGHT : Math.max(0, Math.floor(height / 2));
+}
+
+// Which physical color each band gets — header/footer alternate between
+// yellow/blue based on the colorsSwapped flag (see MpChoreographySwapContextPad),
+// body is always the fixed body color.
+function mpChoreographyBandColor(element, zone) {
+  if (zone === 'body') return MP_CHOR_BODY_COLOR;
+  const swapped = !!element.businessObject.get('colorsSwapped');
+  if (zone === 'header') return swapped ? MP_CHOR_COLOR_A : MP_CHOR_COLOR_B;
+  return swapped ? MP_CHOR_COLOR_B : MP_CHOR_COLOR_A; // footer
+}
+
+function mpChoreographyZoneRect(element, zone) {
+  const w = element.width, h = element.height;
+  const bandHeight = mpChoreographyBandHeight(h);
+  if (zone === 'header') return { x: 0, y: 0, width: w, height: bandHeight };
+  if (zone === 'footer') return { x: 0, y: h - bandHeight, width: w, height: bandHeight };
+  return { x: 0, y: bandHeight, width: w, height: Math.max(0, h - 2 * bandHeight) };
+}
+
+// Custom renderer for bpmn:ChoreographyTask — without this, dropping the
+// shape from the palette above throws immediately (confirmed empirically
+// with a headless run): bpmn-js's own renderer claims every
+// bpmn:FlowElement type as renderable, but its *internal* per-type drawing
+// table has no entry for choreography types, so it crashes trying to call
+// one ("this._renderer(...) is not a function") instead of drawing a
+// generic fallback box.
+//
+// bpmn-js/diagram-js renderers are just eventBus listeners on the
+// 'render.shape' / 'render.getShapePath' hooks (every BaseRenderer
+// subclass — including bpmn-js's own — wires itself up exactly this way
+// internally); registering our own listener at a higher priority (1500 vs.
+// the built-in renderer's 1000) means OUR canRender()/drawShape() gets
+// asked first for this one type and the built-in one never gets a chance
+// to crash on it. No subclassing needed, since this vendor bundle is a
+// plain <script> include with no exported base classes to extend.
+//
+// Draws three bands — header (name), body (bodyText), footer (footerText)
+// — inside a rounded rectangle matching Task's own corner radius, entirely
+// from element.width/height at render time, so a resize (see the
+// commandStack.shape.resize.canExecute override further down) just
+// redraws cleanly at the new size instead of clipping. Still deliberately
+// plain compared to a real choreography renderer: no per-participant
+// coloring, no message icon, no multi-line text wrapping, no popup
+// menu/rules polish. It's the first concrete step of the "own renderer"
+// work item KOMPENDIUM_GIT_BPMN.md section 10 still lists as open, not a
+// finished visual.
+function MpChoreographyRenderer(eventBus) {
+  const self = this;
+  const PRIORITY = 1500;
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+
+  function svgRect(parent, x, y, w, h, attrs) {
+    const r = document.createElementNS(SVG_NS, 'rect');
+    r.setAttribute('x', x);
+    r.setAttribute('y', y);
+    r.setAttribute('width', Math.max(w, 0));
+    r.setAttribute('height', Math.max(h, 0));
+    r.setAttribute('fill', (attrs && attrs.fill) || 'none');
+    if (attrs && attrs.stroke !== undefined) {
+      if (attrs.stroke) {
+        r.setAttribute('stroke', attrs.stroke);
+        r.setAttribute('stroke-width', attrs.strokeWidth || 1);
+      }
+    } else {
+      r.setAttribute('stroke', '#555');
+      r.setAttribute('stroke-width', attrs && attrs.strokeWidth || 2);
+    }
+    if (attrs && attrs.rx) { r.setAttribute('rx', attrs.rx); r.setAttribute('ry', attrs.rx); }
+    parent.appendChild(r);
+    return r;
+  }
+
+  function svgBandText(parent, zoneRect, text, isPlaceholder, richHtml) {
+    const fo = document.createElementNS(SVG_NS, 'foreignObject');
+    fo.setAttribute('x', zoneRect.x);
+    fo.setAttribute('y', zoneRect.y);
+    fo.setAttribute('width', Math.max(zoneRect.width, 0));
+    fo.setAttribute('height', Math.max(zoneRect.height, 0));
+    const div = document.createElement('div');
+    div.className = 'mp-chor-band-text' + (isPlaceholder ? ' mp-chor-band-placeholder' : '');
+    // Bands are already HTML (foreignObject > div), so bold is just real
+    // markup here — no SVG text-measurement/re-wrap needed the way plain
+    // <text> elements require. richHtml is mp:richLabel/mp:bodyTextRich/
+    // mp:footerTextRich — a string containing ONLY the original text with
+    // "<b>...</b>" wrapped around bold spans (built by mpBuildRichLabel,
+    // which HTML-escapes everything else), so this innerHTML assignment
+    // can't introduce any other markup.
+    if (richHtml && !isPlaceholder) div.innerHTML = richHtml;
+    else div.textContent = text;
+    fo.appendChild(div);
+    parent.appendChild(fo);
+    return fo;
+  }
+
+  // Returns the stored rich (bold) markup for a band if it's still valid —
+  // i.e. its own plain text matches the CURRENT plain value exactly — so a
+  // stale mp:*Rich attribute left over from a plain (non-bold-aware) edit
+  // elsewhere never gets rendered against text it doesn't actually describe.
+  function bandRichHtml(bo, zone, plainText) {
+    const rich = zone === 'header' ? bo.get('richLabel')
+      : zone === 'body' ? bo.get('bodyTextRich')
+      : bo.get('footerTextRich');
+    if (!rich) return null;
+    const parsed = mpParseRichLabel(rich);
+    if (parsed.text !== plainText) return null;
+    return rich;
+  }
+
+  this.canRender = function(element) {
+    return element.type === 'bpmn:ChoreographyTask';
+  };
+
+  this.drawShape = function(parentGfx, element) {
+    const w = element.width, h = element.height;
+    const bo = element.businessObject;
+    const r = MP_CHOR_CORNER_RADIUS;
+
+    // Clip band fills to the rounded outer rect so square-cornered bands
+    // never poke past the rounded corners — the border itself is drawn
+    // separately, on top, unclipped, so it stays perfectly crisp.
+    const clipId = 'mp-chor-clip-' + String(element.id).replace(/[^a-zA-Z0-9_-]/g, '');
+    const defs = document.createElementNS(SVG_NS, 'defs');
+    const clipPath = document.createElementNS(SVG_NS, 'clipPath');
+    clipPath.setAttribute('id', clipId);
+    const clipRect = document.createElementNS(SVG_NS, 'rect');
+    clipRect.setAttribute('x', 0); clipRect.setAttribute('y', 0);
+    clipRect.setAttribute('width', w); clipRect.setAttribute('height', h);
+    clipRect.setAttribute('rx', r); clipRect.setAttribute('ry', r);
+    clipPath.appendChild(clipRect);
+    defs.appendChild(clipPath);
+    parentGfx.appendChild(defs);
+
+    const bandsGroup = document.createElementNS(SVG_NS, 'g');
+    bandsGroup.setAttribute('clip-path', 'url(#' + clipId + ')');
+    parentGfx.appendChild(bandsGroup);
+
+    const header = mpChoreographyZoneRect(element, 'header');
+    const body = mpChoreographyZoneRect(element, 'body');
+    const footer = mpChoreographyZoneRect(element, 'footer');
+
+    svgRect(bandsGroup, 0, 0, w, h, { fill: 'white', stroke: false });
+    svgRect(bandsGroup, header.x, header.y, header.width, header.height, { fill: mpChoreographyBandColor(element, 'header'), stroke: false });
+    svgRect(bandsGroup, body.x, body.y, body.width, body.height, { fill: mpChoreographyBandColor(element, 'body'), stroke: false });
+    svgRect(bandsGroup, footer.x, footer.y, footer.width, footer.height, { fill: mpChoreographyBandColor(element, 'footer'), stroke: false });
+
+    const headerText = bo.name || 'Header';
+    const bodyText = bo.get('bodyText') || 'Body';
+    const footerText = bo.get('footerText') || 'Footer';
+    svgBandText(bandsGroup, header, headerText, !bo.name, bandRichHtml(bo, 'header', bo.name || ''));
+    svgBandText(bandsGroup, body, bodyText, !bo.get('bodyText'), bandRichHtml(bo, 'body', bo.get('bodyText') || ''));
+    svgBandText(bandsGroup, footer, footerText, !bo.get('footerText'), bandRichHtml(bo, 'footer', bo.get('footerText') || ''));
+
+    // Divider lines between bands, drawn inside the clipped group so they
+    // never run past the rounded corners either.
+    svgRect(bandsGroup, 0, header.height - 1, w, 1, { fill: '#555', stroke: false });
+    svgRect(bandsGroup, 0, h - footer.height, w, 1, { fill: '#555', stroke: false });
+
+    // Border last, unclipped, so the rounded outline itself stays crisp.
+    svgRect(parentGfx, 0, 0, w, h, { rx: r, fill: 'none', strokeWidth: 2 });
+
+    return parentGfx;
+  };
+
+  this.getShapePath = function(shape) {
+    const x = shape.x, y = shape.y, w = shape.width, h = shape.height;
+    return 'M' + x + ',' + y + 'L' + (x + w) + ',' + y + 'L' + (x + w) + ',' + (y + h) + 'L' + x + ',' + (y + h) + 'Z';
+  };
+
+  eventBus.on(['render.shape', 'render.connection'], PRIORITY, function(event, context) {
+    const element = context.element;
+    if (self.canRender(element)) {
+      return event.type === 'render.shape' ? self.drawShape(context.gfx, element) : null;
+    }
+  });
+
+  eventBus.on(['render.getShapePath', 'render.getConnectionPath'], PRIORITY, function(event, element) {
+    if (self.canRender(element)) {
+      return event.type === 'render.getShapePath' ? self.getShapePath(element) : null;
+    }
+  });
+}
+MpChoreographyRenderer.$inject = ['eventBus'];
+
+// Renders a "message envelope" — a plain bpmn:TextAnnotation marked with
+// isEnvelope (see MP_MODDLE_EXTENSION above) — as a small envelope icon
+// instead of bpmn-js's default annotation box. Its fill tracks whichever
+// band (header/footer) of its owning Choreography Task it's attached to,
+// read live via envelopeTargetId/envelopeZone at every draw, so it repaints
+// correctly on its own after a resize/move and — combined with the forced
+// 'elements.changed' fire in MpChoreographySwapContextPad above — after a
+// color swap too, without ever caching a color value anywhere.
+function MpEnvelopeRenderer(eventBus, elementRegistry) {
+  const self = this;
+  const PRIORITY = 1500;
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+
+  function envelopeFillColor(element) {
+    const bo = element.businessObject;
+    const targetId = bo.get('envelopeTargetId');
+    const zone = bo.get('envelopeZone');
+    const target = targetId && elementRegistry.get(targetId);
+    if (target && target.businessObject) {
+      return mpChoreographyBandColor(target, zone === 'footer' ? 'footer' : 'header');
+    }
+    return '#e0e0e0'; // orphaned envelope (target deleted) — neutral gray
+  }
+
+  // The envelope's own label — its inherited bpmn:TextAnnotation `text` —
+  // rendered as ordinary HTML (foreignObject > div, same technique as
+  // MpChoreographyRenderer's svgBandText) beside or below the icon per
+  // mpEnvelopeLabelRect(), never on top of it. Word-wrap is just normal CSS
+  // text flow here, no SVG measurement needed.
+  function drawLabel(parentGfx, element) {
+    const text = element.businessObject.get('text');
+    if (!text) return;
+    const rect = mpEnvelopeLabelRect(element);
+    const fo = document.createElementNS(SVG_NS, 'foreignObject');
+    fo.setAttribute('x', rect.x);
+    fo.setAttribute('y', rect.y);
+    fo.setAttribute('width', Math.max(rect.width, 0));
+    fo.setAttribute('height', Math.max(rect.height, 0));
+    const div = document.createElement('div');
+    div.className = 'mp-envelope-label';
+    div.style.textAlign = rect.align;
+    div.style.justifyContent = mpVAlignToJustifyContent(rect.valign);
+    div.textContent = text;
+    fo.appendChild(div);
+    parentGfx.appendChild(fo);
+  }
+
+  this.canRender = function(element) {
+    return element.type === 'bpmn:TextAnnotation' && !!element.businessObject.get('isEnvelope');
+  };
+
+  this.drawShape = function(parentGfx, element) {
+    const w = element.width, h = element.height;
+    const fill = envelopeFillColor(element);
+
+    const rect = document.createElementNS(SVG_NS, 'rect');
+    rect.setAttribute('x', 0); rect.setAttribute('y', 0);
+    rect.setAttribute('width', w); rect.setAttribute('height', h);
+    rect.setAttribute('fill', fill);
+    rect.setAttribute('stroke', '#333');
+    rect.setAttribute('stroke-width', 1.5);
+    parentGfx.appendChild(rect);
+
+    // Envelope "flap" — a simple V from the top corners to the vertical
+    // center, the same convention as BPMN's own message icon.
+    const flap = document.createElementNS(SVG_NS, 'path');
+    flap.setAttribute('d', 'M2,2 L' + (w / 2) + ',' + (h * 0.58) + ' L' + (w - 2) + ',2');
+    flap.setAttribute('fill', 'none');
+    flap.setAttribute('stroke', '#333');
+    flap.setAttribute('stroke-width', 1.5);
+    parentGfx.appendChild(flap);
+
+    drawLabel(parentGfx, element);
+
+    return parentGfx;
+  };
+
+  this.getShapePath = function(shape) {
+    const x = shape.x, y = shape.y, w = shape.width, h = shape.height;
+    return 'M' + x + ',' + y + 'L' + (x + w) + ',' + y + 'L' + (x + w) + ',' + (y + h) + 'L' + x + ',' + (y + h) + 'Z';
+  };
+
+  eventBus.on(['render.shape', 'render.connection'], PRIORITY, function(event, context) {
+    const element = context.element;
+    if (self.canRender(element)) {
+      return event.type === 'render.shape' ? self.drawShape(context.gfx, element) : null;
+    }
+  });
+
+  eventBus.on(['render.getShapePath', 'render.getConnectionPath'], PRIORITY, function(event, element) {
+    if (self.canRender(element)) {
+      return event.type === 'render.getShapePath' ? self.getShapePath(element) : null;
+    }
+  });
+}
+MpEnvelopeRenderer.$inject = ['eventBus', 'elementRegistry'];
+
+// Lets an envelope's own label (its inherited bpmn:TextAnnotation `text`)
+// be set by double-clicking the envelope icon — same interaction habit as
+// every other double-click-to-edit element in this app. This deliberately
+// does NOT rely on bpmn-js's own built-in direct-editing for TextAnnotation
+// (which activates by default and edits the same `text` field): that box
+// draws itself directly over the small icon, and since MpEnvelopeRenderer
+// never shows `text` there at all, anything typed into it used to vanish
+// visually the moment editing ended — that was the reported bug. Instead
+// this positions a small overlay editor exactly where the label ACTUALLY
+// renders (mpEnvelopeLabelRect — beside or below the icon, per
+// envelopeLabelPosition) and wins the same dblclick before bpmn-js's own
+// handler gets it, the same technique MpChoreographyDirectEditing already
+// uses for choreography bands.
+function MpEnvelopeDirectEditing(eventBus, overlays, modeling) {
+  let active = null; // { overlayId, element, editorEl }
+
+  function commitAndClose(shouldCommit) {
+    if (!active) return;
+    const { overlayId, element, editorEl } = active;
+    active = null;
+    if (shouldCommit) {
+      const value = editorEl.innerText.trim();
+      // Capture the exact bounds BEFORE the update — bpmn-js ships a
+      // built-in behavior that reacts to ANY bpmn:TextAnnotation's `text`
+      // changing via updateProperties by auto-resizing its height to fit
+      // that text (getTextAnnotationBounds, min 30px). Sensible for an
+      // ordinary annotation, but it fights MpEnvelopeRenderer's fixed icon
+      // proportions here — the "label commits fine but the envelope
+      // stretches vertically" bug report.
+      const originalBounds = { x: element.x, y: element.y, width: element.width, height: element.height };
+      modeling.updateProperties(element, { text: value });
+      // Restore the EXACT original bounds (not just the same width/height
+      // re-centered on the new position) — re-centering on whatever
+      // bpmn-js's own behavior computed still let its rounding introduce a
+      // stray 1px drift per edit, compounding over repeated edits. Snapping
+      // back to the precise pre-edit bounds is drift-free by construction.
+      if (element.x !== originalBounds.x || element.y !== originalBounds.y ||
+          element.width !== originalBounds.width || element.height !== originalBounds.height) {
+        modeling.resizeShape(element, originalBounds);
+      }
+    }
+    overlays.remove(overlayId);
+  }
+
+  function openEditor(element) {
+    commitAndClose(true);
+
+    const rect = mpEnvelopeLabelRect(element);
+    const editorEl = document.createElement('div');
+    editorEl.className = 'mp-envelope-label-editor';
+    editorEl.setAttribute('contenteditable', 'true');
+    editorEl.style.textAlign = rect.align;
+    editorEl.style.width = rect.width + 'px';
+    editorEl.style.minHeight = Math.min(rect.height, 20) + 'px';
+    editorEl.textContent = element.businessObject.get('text') || '';
+
+    const overlayId = overlays.add(element, 'mp-envelope-label-edit', {
+      position: { top: rect.y, left: rect.x },
+      html: editorEl
+    });
+
+    active = { overlayId, element, editorEl };
+
+    editorEl.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commitAndClose(true); }
+      if (e.key === 'Escape') { e.preventDefault(); commitAndClose(false); }
+    });
+    editorEl.addEventListener('blur', function() { commitAndClose(true); });
+    editorEl.addEventListener('mousedown', function(e) { e.stopPropagation(); });
+    editorEl.addEventListener('dblclick', function(e) { e.stopPropagation(); });
+
+    setTimeout(function() {
+      editorEl.focus();
+      const range = document.createRange();
+      range.selectNodeContents(editorEl);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }, 0);
+  }
+
+  eventBus.on('element.dblclick', 2000, function(event) {
+    const element = event.element;
+    if (!element || element.type !== 'bpmn:TextAnnotation' || !element.businessObject.get('isEnvelope')) return;
+    openEditor(element);
+    event.stopPropagation();
+    return false;
+  });
+}
+MpEnvelopeDirectEditing.$inject = ['eventBus', 'overlays', 'modeling'];
+
+// One context-pad icon — move the label beside/below the icon — shown only
+// when an envelope is selected. Same contextPad.registerProvider() pattern
+// as MpChoreographySwapContextPad above.
+function MpEnvelopeLabelContextPad(contextPad, modeling) {
+  this.getContextPadEntries = function(element) {
+    if (element.type !== 'bpmn:TextAnnotation' || !element.businessObject.get('isEnvelope')) return {};
+    const current = element.businessObject.get('envelopeLabelPosition') || 'below';
+    const next = current === 'side' ? 'below' : 'side';
+    return {
+      'mp-envelope-toggle-label-position': {
+        group: 'edit',
+        className: 'mp-chor-icon mp-envelope-toggle-label',
+        title: current === 'side' ? 'Move label below the envelope' : 'Move label beside the envelope',
+        action: {
+          click: function(event, el) {
+            modeling.updateProperties(el, { envelopeLabelPosition: next });
+          }
+        }
+      }
+    };
+  };
+  contextPad.registerProvider(this);
+}
+MpEnvelopeLabelContextPad.$inject = ['contextPad', 'modeling'];
+
+// Creates one envelope (see MpEnvelopeRenderer above) attached to a
+// Choreography Task's header or footer band via a plain bpmn:Association —
+// bpmn-js renders that connection type as a dotted line with no arrowhead
+// by default, which is exactly the look real BPMN choreography messages use,
+// so no custom connection renderer is needed for the line itself.
+function addChoreographyEnvelope(taskElement, zone) {
+  if (!modeler) return;
+  // Defensive — refreshEnvelopeButtons() shouldn't even show a "+" for a
+  // zone that already has an envelope, but guard here too in case this
+  // ever gets called some other way.
+  if (mpChoreographyHasEnvelope(taskElement, zone)) return;
+  const modeling = modeler.get('modeling');
+  const elementFactory = modeler.get('elementFactory');
+  const bpmnFactory = modeler.get('bpmnFactory');
+
+  const envelopeBo = bpmnFactory.create('bpmn:TextAnnotation', {
+    text: '',
+    isEnvelope: true,
+    envelopeZone: zone,
+    envelopeTargetId: taskElement.id
+  });
+  const envelopeShape = elementFactory.createShape({
+    type: 'bpmn:TextAnnotation',
+    businessObject: envelopeBo,
+    width: MP_ENVELOPE_WIDTH,
+    height: MP_ENVELOPE_HEIGHT
+  });
+
+  // modeling.createShape's position argument is the shape's CENTER point.
+  const position = {
+    x: taskElement.x + taskElement.width / 2,
+    y: zone === 'header'
+      ? taskElement.y - MP_ENVELOPE_GAP - envelopeShape.height / 2
+      : taskElement.y + taskElement.height + MP_ENVELOPE_GAP + envelopeShape.height / 2
+  };
+
+  try {
+    modeling.createShape(envelopeShape, position, taskElement.parent);
+    // Passing an explicit {type} skips bpmnRules.canConnect() inference
+    // entirely and just creates exactly this connection type — same
+    // shortcut createAndLinkNewCallActivityTarget() uses elsewhere for
+    // createShape.
+    modeling.connect(envelopeShape, taskElement, { type: 'bpmn:Association' });
+  } catch (e) {
+    setStatus('Could not add envelope', 'err');
+    return;
+  }
+
+  // modeling.createShape()/connect() leave the new envelope selected —
+  // switch back to the task so the "+" buttons (tied to the task's own
+  // selection, see refreshEnvelopeButtons) reappear immediately instead of
+  // vanishing until the user reselects it.
+  modeler.get('selection').select(taskElement);
+}
+
+// The "+" buttons shown above/below a selected Choreography Task, each
+// calling addChoreographyEnvelope() above for its band. Plain Overlays
+// (like MpChoreographyDirectEditing's inline textarea) rather than
+// context-pad icons, since the ask was specifically for them to sit right
+// above/below the shape, not clustered to its side with the other tools.
+let mpEnvelopeButtonOverlayIds = [];
+let mpEnvelopeButtonElementId = null;
+
+function clearEnvelopeButtons() {
+  if (!modeler) return;
+  const overlays = modeler.get('overlays');
+  mpEnvelopeButtonOverlayIds.forEach(function(id) {
+    try { overlays.remove(id); } catch (e) {}
+  });
+  mpEnvelopeButtonOverlayIds = [];
+  mpEnvelopeButtonElementId = null;
+}
+
+// A Choreography Task has exactly one header and one footer — so exactly
+// one envelope can meaningfully belong to each zone. Used both to decide
+// whether refreshEnvelopeButtons() should even show a "+" for a zone, and
+// as a last-line guard in addChoreographyEnvelope() itself.
+function mpChoreographyHasEnvelope(taskElement, zone) {
+  return modeler.get('elementRegistry').filter(function(e) {
+    return e.type === 'bpmn:TextAnnotation' &&
+      e.businessObject.get('isEnvelope') &&
+      e.businessObject.get('envelopeTargetId') === taskElement.id &&
+      e.businessObject.get('envelopeZone') === zone;
+  }).length > 0;
+}
+
+function refreshEnvelopeButtons() {
+  if (!modeler) return;
+  clearEnvelopeButtons();
+  const selection = modeler.get('selection').get();
+  if (!selection || selection.length !== 1) return;
+  const el = selection[0];
+  if (el.type !== 'bpmn:ChoreographyTask') return;
+
+  const overlays = modeler.get('overlays');
+
+  function makeButton(zone) {
+    const btn = document.createElement('div');
+    btn.className = 'mp-chor-envelope-add-btn';
+    btn.title = zone === 'header' ? 'Add message envelope (top)' : 'Add message envelope (bottom)';
+    btn.textContent = '+';
+    // Both of these would otherwise bubble up to the canvas and deselect/
+    // start a drag on the task sitting right underneath the button.
+    btn.addEventListener('mousedown', function(e) { e.stopPropagation(); });
+    btn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      addChoreographyEnvelope(el, zone);
+    });
+    return btn;
+  }
+
+  const ids = [];
+  // One envelope per zone, max — once a zone already has one, its "+"
+  // simply isn't shown at all rather than shown-but-disabled, since there's
+  // nothing more the user could do with it there (delete the existing
+  // envelope first to free up the zone again).
+  if (!mpChoreographyHasEnvelope(el, 'header')) {
+    ids.push(overlays.add(el, 'mp-choreography-envelope-btn', {
+      position: { top: -14, left: el.width / 2 - 11 },
+      html: makeButton('header')
+    }));
+  }
+  if (!mpChoreographyHasEnvelope(el, 'footer')) {
+    ids.push(overlays.add(el, 'mp-choreography-envelope-btn', {
+      position: { bottom: -14, left: el.width / 2 - 11 },
+      html: makeButton('footer')
+    }));
+  }
+  mpEnvelopeButtonOverlayIds = ids;
+  mpEnvelopeButtonElementId = el.id;
+}
+
+// Lets each of the three bands be edited independently by double-clicking
+// directly on it — matching the "double-click a task to rename it" muscle
+// memory this app already relies on for every other element, just applied
+// per-band instead of once per element.
+//
+// This intentionally does NOT hook into bpmn-js's built-in DirectEditing
+// service: that machinery (a shared textarea positioned/sized by a
+// "LabelEditingProvider" contract) is built around one label per element,
+// and reshaping it for three independently-positioned bands would mean
+// reverse-engineering more of this minified vendor bundle's internals for
+// a service we don't get much benefit from reusing. Instead this uses
+// bpmn-js's public, documented Overlays service (the same API this app
+// could use for any element-anchored HTML) to place a plain contenteditable
+// <div> over the clicked band — simpler, and just as officially supported.
+// contenteditable (rather than a <textarea>) is what lets the browser's own
+// native Ctrl+B bold a selection while editing, exactly like bpmn-js's own
+// direct-editing box already does elsewhere in this app — and since a band
+// is already rendered as HTML (foreignObject > div, see svgBandText above),
+// committing that bold as real "<b>" markup needs no SVG re-wrap step at
+// all, unlike the generic mpRewrapWithBold() path for plain <text> labels.
+function MpChoreographyDirectEditing(eventBus, overlays, canvas, modeling) {
+  let active = null; // { overlayId, element, zone, editorEl }
+
+  function propNameFor(zone) {
+    return zone === 'header' ? 'name' : (zone === 'body' ? 'bodyText' : 'footerText');
+  }
+  function richPropNameFor(zone) {
+    return zone === 'header' ? 'richLabel' : (zone === 'body' ? 'bodyTextRich' : 'footerTextRich');
+  }
+
+  function commitAndClose(shouldCommit) {
+    if (!active) return;
+    const { overlayId, element, zone, editorEl } = active;
+    active = null;
+    if (shouldCommit) {
+      const extracted = mpExtractBoldRanges(editorEl);
+      const trimmed = mpTrimWithRanges(extracted.text, extracted.ranges);
+      const richLabel = mpBuildRichLabel(trimmed.text, trimmed.ranges);
+      const props = {};
+      props[propNameFor(zone)] = trimmed.text;
+      props[richPropNameFor(zone)] = richLabel;
+      modeling.updateProperties(element, props);
+    }
+    overlays.remove(overlayId);
+  }
+
+  function currentValue(element, zone) {
+    if (zone === 'header') return element.businessObject.name || '';
+    if (zone === 'body') return element.businessObject.get('bodyText') || '';
+    return element.businessObject.get('footerText') || '';
+  }
+
+  function currentRich(element, zone) {
+    return element.businessObject.get(richPropNameFor(zone)) || null;
+  }
+
+  function openEditor(element, zone) {
+    commitAndClose(true); // in case a different band/element was already being edited
+
+    const zoneRect = mpChoreographyZoneRect(element, zone);
+    const editorEl = document.createElement('div');
+    editorEl.className = 'mp-chor-inline-editor';
+    editorEl.setAttribute('contenteditable', 'true');
+    editorEl.style.width = zoneRect.width + 'px';
+    editorEl.style.height = zoneRect.height + 'px';
+
+    const plain = currentValue(element, zone);
+    const rich = currentRich(element, zone);
+    // Only seed the bold markup back in if it still describes the CURRENT
+    // plain text exactly — guards against a stale mp:*Rich value left over
+    // from before this zone's text was last changed some other way.
+    if (rich && mpParseRichLabel(rich).text === plain) {
+      editorEl.innerHTML = rich;
+    } else {
+      editorEl.textContent = plain;
+    }
+
+    const overlayId = overlays.add(element, 'mp-choreography-edit', {
+      position: { top: zoneRect.y, left: zoneRect.x },
+      html: editorEl
+    });
+
+    active = { overlayId, element, zone, editorEl };
+
+    editorEl.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commitAndClose(true); }
+      if (e.key === 'Escape') { e.preventDefault(); commitAndClose(false); }
+    });
+    editorEl.addEventListener('blur', function() { commitAndClose(true); });
+    editorEl.addEventListener('mousedown', function(e) { e.stopPropagation(); });
+    editorEl.addEventListener('dblclick', function(e) { e.stopPropagation(); });
+
+    setTimeout(function() {
+      editorEl.focus();
+      const range = document.createRange();
+      range.selectNodeContents(editorEl);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }, 0);
+  }
+
+  eventBus.on('element.dblclick', 2000, function(event) {
+    const element = event.element;
+    if (!element || element.type !== 'bpmn:ChoreographyTask') return;
+
+    const originalEvent = event.originalEvent;
+    const containerRect = canvas.getContainer().getBoundingClientRect();
+    const vb = canvas.viewbox();
+    const diagramY = vb.y + (originalEvent.clientY - containerRect.top) / vb.scale;
+    const relY = diagramY - element.y;
+    const bandHeight = mpChoreographyBandHeight(element.height);
+    const zone = relY < bandHeight ? 'header' : (relY > element.height - bandHeight ? 'footer' : 'body');
+
+    openEditor(element, zone);
+    event.stopPropagation();
+    return false;
+  });
+}
+MpChoreographyDirectEditing.$inject = ['eventBus', 'overlays', 'canvas', 'modeling'];
+
+// One extra context-pad icon — swap header/footer colors — shown only when
+// a Choreography Task is selected. contextPad.registerProvider() works the
+// same way palette.registerProvider() does (see MpChoreographyPalette
+// above): register an object with a getContextPadEntries(element) method;
+// returning {} for anything that isn't our type adds nothing and leaves
+// every other element's context pad (replace/connect/delete, ...)
+// untouched.
+function MpChoreographySwapContextPad(contextPad, modeling, elementRegistry, eventBus) {
+  this.getContextPadEntries = function(element) {
+    if (element.type !== 'bpmn:ChoreographyTask') return {};
+    return {
+      'mp-choreography-swap-colors': {
+        group: 'edit',
+        className: 'mp-chor-icon mp-chor-swap',
+        title: 'Swap header/footer colors',
+        action: {
+          click: function(event, el) {
+            const swapped = !!el.businessObject.get('colorsSwapped');
+            modeling.updateProperties(el, { colorsSwapped: !swapped });
+            // The swap only actually changes the ChoreographyTask's own
+            // businessObject — any envelope shapes attached to it (see
+            // MpEnvelopeRenderer/addChoreographyEnvelope below) derive their
+            // fill color from THIS element's colorsSwapped flag at render
+            // time, but bpmn-js has no way to know they depend on it, so
+            // they won't repaint on their own. Find them and force a
+            // redraw via the same 'elements.changed' event diagram-js's own
+            // change-support module listens to internally.
+            const linkedEnvelopes = elementRegistry.filter(function(e) {
+              return e.type === 'bpmn:TextAnnotation' &&
+                e.businessObject.get('isEnvelope') &&
+                e.businessObject.get('envelopeTargetId') === el.id;
+            });
+            if (linkedEnvelopes.length) {
+              eventBus.fire('elements.changed', { elements: linkedEnvelopes });
+            }
+          }
+        }
+      }
+    };
+  };
+  contextPad.registerProvider(this);
+}
+MpChoreographySwapContextPad.$inject = ['contextPad', 'modeling', 'elementRegistry', 'eventBus'];
+
+// bpmn-js's palette has no concept of visually grouping several of its
+// internal "group" blocks together or reordering them — each provider's
+// entries just get merged, in provider-priority order, into one flat
+// object, and every distinct `group` name becomes its own DOM block
+// appended in the order it's first encountered (see the vendor bundle's
+// Palette#_update). That's fine for adding one entry to an existing group
+// (MpTextAnnotationPalette above), but not for slotting a whole new group
+// in between two existing ones without reimplementing bpmn-js's own
+// PaletteProvider.
+//
+// Instead, once every provider has registered and the palette DOM exists,
+// this just physically reorders the already-rendered `.group` blocks:
+// [tools + artifact] ("Ogólne") → divider → [mp-choreography]
+// ("Choreografia") → divider → everything else ("Collaboration").
+// Pure DOM reordering, no bpmn-js internals patched. Safe to run once: the
+// palette's _update() (which rebuilds .djs-palette-entries from scratch)
+// only fires while providers are registering, i.e. during `new BpmnJS()`
+// above — never again afterwards, since diagram import reuses this same
+// palette instance (see the paletteEl relocation comment below). Takes the
+// already-located .djs-palette element rather than re-querying for it,
+// since by the time this runs it's typically already been moved out of
+// #canvas and into the fixed sidebar (see initModeler()).
+function reorganizePaletteForChoreography(paletteEl) {
+  const entriesEl = paletteEl && paletteEl.querySelector('.djs-palette-entries');
+  if (!entriesEl) return;
+
+  const GENERAL_GROUPS = ['tools', 'artifact'];
+  const CHOREOGRAPHY_GROUP = 'mp-choreography';
+
+  const groupEls = Array.from(entriesEl.querySelectorAll(':scope > [data-group]'));
+  const byName = {};
+  groupEls.forEach(function(el) { byName[el.getAttribute('data-group')] = el; });
+
+  function makeDivider(label) {
+    const hr = document.createElement('hr');
+    hr.className = 'mp-palette-section-divider';
+    hr.title = label;
+    return hr;
+  }
+
+  const ordered = [];
+  GENERAL_GROUPS.forEach(function(name, idx) {
+    if (!byName[name]) return;
+    // Divider between the built-in "tools" group (hand/lasso/space/global-
+    // connect) and the "artifact" group (Create group/Create text
+    // annotation) — same visual treatment as the Choreografia/Collaboration
+    // dividers below, just without a functional label since both groups
+    // still belong to the same "Ogólne" section.
+    if (idx > 0) ordered.push(makeDivider('Ogólne'));
+    ordered.push(byName[name]);
+  });
+
+  if (byName[CHOREOGRAPHY_GROUP]) {
+    ordered.push(makeDivider('Choreografia'));
+    ordered.push(byName[CHOREOGRAPHY_GROUP]);
+  }
+
+  const known = GENERAL_GROUPS.concat([CHOREOGRAPHY_GROUP]);
+  const rest = groupEls.filter(function(el) { return known.indexOf(el.getAttribute('data-group')) === -1; });
+  if (rest.length) {
+    ordered.push(makeDivider('Collaboration'));
+    rest.forEach(function(el) { ordered.push(el); });
+  }
+
+  ordered.forEach(function(el) { entriesEl.appendChild(el); });
+}
+
 function initModeler() {
   modeler = new BpmnJS({
     container: '#canvas',
+    moddleExtensions: {
+      mp: MP_MODDLE_EXTENSION
+    },
     additionalModules: [
       {
-        __init__: ['mpTextAnnotationPalette'],
-        mpTextAnnotationPalette: ['type', MpTextAnnotationPalette]
+        __init__: ['mpTextAnnotationPalette', 'mpChoreographyRenderer', 'mpEnvelopeRenderer', 'mpChoreographyDirectEditing', 'mpEnvelopeDirectEditing', 'mpChoreographySwapContextPad', 'mpEnvelopeLabelContextPad', 'mpChoreographyPalette'],
+        mpTextAnnotationPalette: ['type', MpTextAnnotationPalette],
+        mpChoreographyRenderer: ['type', MpChoreographyRenderer],
+        mpEnvelopeRenderer: ['type', MpEnvelopeRenderer],
+        mpChoreographyDirectEditing: ['type', MpChoreographyDirectEditing],
+        mpEnvelopeDirectEditing: ['type', MpEnvelopeDirectEditing],
+        mpChoreographySwapContextPad: ['type', MpChoreographySwapContextPad],
+        mpEnvelopeLabelContextPad: ['type', MpEnvelopeLabelContextPad],
+        mpChoreographyPalette: ['type', MpChoreographyPalette]
       }
     ]
   });
@@ -873,6 +2342,13 @@ function initModeler() {
   if (paletteEl && palettePanel) {
     palettePanel.appendChild(paletteEl);
   }
+
+  // Reorganize the palette into the Ogólne / Choreografia / Collaboration
+  // layout discussed separately — see reorganizePaletteForChoreography()
+  // above. Must run after the palette DOM exists (right after the move
+  // above), and only needs to run this one time — see that function's
+  // comment for why.
+  reorganizePaletteForChoreography(paletteEl);
 
   // Make actual move/resize snapping follow the "Small grid size" Settings
   // value, instead of bpmn-js's own built-in GridSnapping service, which
@@ -909,6 +2385,13 @@ function initModeler() {
     if (shape && shape.type === 'bpmn:SubProcess' && shape.collapsed) {
       return true;
     }
+    // Choreography Task (see MpChoreographyRenderer above) — its header/
+    // body/footer bands are drawn purely from element.width/height at
+    // render time, so a resize just redraws cleanly at the new size
+    // instead of clipping anything.
+    if (shape && shape.type === 'bpmn:ChoreographyTask') {
+      return true;
+    }
     return undefined;
   });
 
@@ -919,6 +2402,122 @@ function initModeler() {
   modeler.on('resize.end', () => {
     refreshDetailOverlays();
     updatePropsPanel(modeler.get('selection').get());
+  });
+
+  // Partial bold for any direct-edited label (see mp*RichLabel* helpers
+  // above). 'directEditing.activate' fires with the DOM textbox not yet
+  // created — the built-in Textbox creates it synchronously right after, so
+  // a 0ms deferral is needed to grab it, same trick used throughout this
+  // file for anything that needs to run after bpmn-js's own synchronous
+  // work in the same tick. We cache the element + textbox reference here
+  // because 'directEditing.complete' fires with `active` already cleared —
+  // see the 'directEditing.cancel' comment below for why.
+  let mpDirectEditingActive = null; // { element, contentEl }
+
+  function mpCurrentPlainLabel(bo) {
+    if (bo.name !== undefined) return bo.name || '';
+    if (bo.text !== undefined) return bo.text || '';
+    return '';
+  }
+
+  // Reads whatever's currently in the (still-live) edit box and builds the
+  // richLabel string from it — synchronously, while contentEl is still
+  // guaranteed alive. The actual commandStack write is deferred: calling
+  // modeling.updateProperties() from directly inside a 'directEditing.
+  // cancel'/'complete' handler re-triggers the very same reentrant
+  // commandStack.changed → isActive() && cancel() guard described above
+  // WHILE bpmn-js's own cancel()/close() call for THIS session is still
+  // unwinding, which corrupts its internal state (confirmed empirically —
+  // it throws deep inside bpmn-js's own marker cleanup). Waiting one tick
+  // lets that whole chain finish first, exactly like every other deferred
+  // post-render hook in this file.
+  function mpCommitRichLabelFromBox(element, contentEl) {
+    const extracted = mpExtractBoldRanges(contentEl);
+    const trimmed = mpTrimWithRanges(extracted.text, extracted.ranges);
+    const nextRichLabel = mpBuildRichLabel(trimmed.text, trimmed.ranges); // null if no bold at all
+    const currentRichLabel = element.businessObject.get('richLabel') || null;
+    if (nextRichLabel !== currentRichLabel) {
+      setTimeout(function() {
+        modeler.get('modeling').updateProperties(element, { richLabel: nextRichLabel });
+      }, 0);
+    }
+  }
+
+  modeler.get('eventBus').on('directEditing.activate', function(event) {
+    const element = event.active && event.active.element;
+    if (!element) return;
+    setTimeout(function() {
+      const contentEl = document.querySelector('.djs-direct-editing-content');
+      if (!contentEl) return;
+      mpDirectEditingActive = { element: element, contentEl: contentEl };
+      const richLabel = element.businessObject && element.businessObject.get && element.businessObject.get('richLabel');
+      if (!richLabel) return;
+      // Re-seed the box with the existing bold spans so reopening an
+      // already-bolded label shows it as bold immediately, instead of the
+      // user having to remember and redo it. Only if the stored text still
+      // matches what's currently in the box — if it doesn't (shouldn't
+      // normally happen), leave the box as plain text rather than guess.
+      const parsed = mpParseRichLabel(richLabel);
+      if (parsed.text === contentEl.innerText.trim()) {
+        contentEl.innerHTML = mpBuildRichLabel(parsed.text, parsed.ranges) || mpEscapeHtml(parsed.text);
+      }
+    }, 0);
+  });
+
+  // Confirmed empirically: bpmn-js's own commandStack.changed listener
+  // ("is direct-editing still active? then cancel it") fires — and actually
+  // CANCELS the session, tearing down the textbox — MID-WAY through a
+  // completely normal, successful edit too: complete()'s own label-update
+  // command trips that safety net (as a side effect of the commandStack
+  // change it just made) before complete() gets to fire its OWN event or
+  // destroy anything itself. So for a normal commit, the real sequence is
+  // 'cancel' (which destroys the textbox) THEN 'complete' (which finds
+  // nothing left to read) — meaning 'cancel', not 'complete', is the only
+  // place the textbox is still guaranteed to be alive.
+  //
+  // Distinguishing that from a REAL user Escape-cancel: by the time this
+  // fires, a real commit has already pushed the new plain text into the
+  // businessObject (that's what triggered the nested cancel in the first
+  // place), so the box's current text will match it exactly. A genuine
+  // Escape never touches the businessObject, so they'll differ. Only
+  // persist bold info when they match.
+  modeler.get('eventBus').on('directEditing.cancel', function() {
+    const active = mpDirectEditingActive;
+    if (active && document.body.contains(active.contentEl)) {
+      const boxPlain = active.contentEl.innerText.trim();
+      if (mpCurrentPlainLabel(active.element.businessObject) === boxPlain) {
+        mpCommitRichLabelFromBox(active.element, active.contentEl);
+      }
+    }
+    // Deferred so a same-tick 'complete' (the commit case above) still sees
+    // mpDirectEditingActive if it ever needs the fallback path below.
+    setTimeout(function() { mpDirectEditingActive = null; }, 0);
+  });
+
+  // Fallback for any editing flow that DOESN'T hit the reentrant-cancel
+  // quirk above (so the textbox is still alive here instead).
+  modeler.get('eventBus').on('directEditing.complete', function() {
+    const active = mpDirectEditingActive;
+    mpDirectEditingActive = null;
+    if (!active || !document.body.contains(active.contentEl)) return;
+    mpCommitRichLabelFromBox(active.element, active.contentEl);
+  });
+
+  // Renders the bold spans a richLabel carries — see mpApplyRichLabelBold()
+  // above for how it splits bpmn-js's own already-positioned/wrapped
+  // <tspan>s without reimplementing bpmn-js's text layout. Fires for every
+  // element (including separate external-label shapes for gateways/events/
+  // flows/pools — labels share their target's businessObject, confirmed
+  // empirically, so reading richLabel off `element.businessObject` works
+  // the same way for both). No-ops instantly for the vast majority of
+  // elements that have never been bolded (no richLabel set at all).
+  modeler.get('eventBus').on('render.shape', 2000, function(event) {
+    const el = event.element;
+    const bo = el && el.businessObject;
+    const richLabel = bo && typeof bo.get === 'function' && bo.get('richLabel');
+    if (!richLabel) return;
+    const gfx = event.gfx;
+    setTimeout(function() { mpApplyRichLabelBold(gfx, el, richLabel); }, 0);
   });
 
   // Pools and lanes are drawn by bpmn-js with a translucent white fill baked
@@ -1169,6 +2768,41 @@ function initModeler() {
     modeler.get('modeling').resizeShape(shape, { x: newX, y: newY, width: newWidth, height: newHeight });
   });
 
+  // Same idea as the task default-size block just above, but for
+  // Choreography Task (Settings ⚙ → "Default Choreography Task size") —
+  // kept as its own dictionary key and its own listener rather than folded
+  // into RESIZABLE_TASK_TYPES, since a header/footer/body shape has a very
+  // different natural size than a plain task and shouldn't be forced to
+  // share one number with it.
+  modeler.get('eventBus').on(['commandStack.shape.create.postExecuted', 'commandStack.shape.append.postExecuted'], function(event) {
+    const size = dictionaries.choreographyTaskDefaultSize || MP_CHOREOGRAPHY_DEFAULT_SIZE;
+    const shape = event.context && event.context.shape;
+    if (!shape || shape.type !== 'bpmn:ChoreographyTask') return;
+    const newWidth = Math.max(MIN_SHAPE_SIZE, Math.round(size.width));
+    const newHeight = Math.max(MIN_SHAPE_SIZE, Math.round(size.height));
+    if (shape.width === newWidth && shape.height === newHeight) return;
+    const newX = Math.round(shape.x + (shape.width - newWidth) / 2);
+    const newY = Math.round(shape.y + (shape.height - newHeight) / 2);
+    modeler.get('modeling').resizeShape(shape, { x: newX, y: newY, width: newWidth, height: newHeight });
+  });
+
+  // An envelope (see addChoreographyEnvelope/MpEnvelopeRenderer above) is
+  // meaningless once its Choreography Task is gone — its fill color falls
+  // back to a neutral gray, and there's nothing left to reconnect to. Rather
+  // than leave that orphan sitting on the canvas, delete it (and its
+  // bpmn:Association, which modeling.removeElements handles automatically)
+  // right along with the task.
+  modeler.get('eventBus').on('commandStack.shape.delete.postExecuted', function(event) {
+    const shape = event.context && event.context.shape;
+    if (!shape || shape.type !== 'bpmn:ChoreographyTask') return;
+    const orphans = modeler.get('elementRegistry').filter(function(e) {
+      return e.type === 'bpmn:TextAnnotation' &&
+        e.businessObject.get('isEnvelope') &&
+        e.businessObject.get('envelopeTargetId') === shape.id;
+    });
+    if (orphans.length) modeler.get('modeling').removeElements(orphans);
+  });
+
   modeler.on('commandStack.changed', async () => {
     hasUnsavedChanges = true;
     setStatus('Unsaved changes', '');
@@ -1191,6 +2825,7 @@ function initModeler() {
     loadMetaFromModel();
     updateTree();
     refreshDetailOverlays();
+    refreshEnvelopeButtons();
     scheduleAutosave();
   });
 
@@ -1211,6 +2846,7 @@ function initModeler() {
   // Properties panel on element selection
   modeler.on('selection.changed', ({ newSelection }) => {
     updatePropsPanel(newSelection);
+    refreshEnvelopeButtons();
   });
 
   restoreLastFileOrNew();
@@ -2682,6 +4318,25 @@ function quantizeToGrid(value, spacing, roundFn) {
   return Math[fn](value / spacing) * spacing;
 }
 
+// Sticky/threshold state for gridSnapping.snapEvent (see patch below) —
+// keyed by axis ('x' | 'y'), reset at the start of every drag/resize/
+// create/connect interaction. Holds the last grid line ACTUALLY snapped to
+// during the current interaction, so each axis can require a full grid
+// spacing of further movement before advancing to the next line, instead
+// of switching at the halfway point the way plain "nearest" rounding does.
+let mpSnapBaseline = {};
+function mpResetSnapBaseline() {
+  mpSnapBaseline = {};
+}
+
+// Same rounding diagram-js's own (minified, hardcoded-to-10) GridSnapping
+// service uses internally — reimplemented here since that helper isn't
+// exposed outside the bundle's own closure.
+function quantizeToGrid(value, spacing, roundFn) {
+  const fn = roundFn || 'round';
+  return Math[fn](value / spacing) * spacing;
+}
+
 // Monkey-patches bpmn-js's built-in GridSnapping service so that every
 // move/resize/connect snap follows `smallGridSize` (the Settings "Small
 // grid size" value) instead of the library's hardcoded 10px. Only patches
@@ -2699,6 +4354,9 @@ function patchGridSnappingSpacing() {
   // Mirrors the original snapValue()'s own logic (including its quirk of
   // treating an explicit 0 for min/max as "not set", via a truthy check
   // rather than a null check) — only the hardcoded "10" becomes dynamic.
+  // Still plain "nearest line" rounding — used as-is for width/height and
+  // a couple of other direct callers inside the bundle that aren't the
+  // interactive drag path snapEvent() below covers.
   gridSnapping.snapValue = function(value, opts) {
     let offset = 0;
     if (opts && opts.offset) offset = opts.offset;
@@ -2714,6 +4372,109 @@ function patchGridSnappingSpacing() {
     }
     return result - offset;
   };
+
+  // snapEvent(event, axis, opts) is the ACTUAL move/resize/create/connect
+  // drag path — diagram-js calls it once per axis ('x' and 'y') on every
+  // "*.move"/"*.end" tick, via a fixed internal `fl(event, axis, newValue)`
+  // helper that both sets `event[axis]` AND accumulates the matching
+  // `event['d'+axis]` delta the rest of diagram-js actually applies the
+  // move from — `fl` itself is a private closure var we can't call
+  // directly, so mpApplySnapDelta below reproduces its exact logic.
+  //
+  // The stock behavior (plain "round to nearest line", same math as
+  // snapValue above) means an ALREADY grid-aligned shape only needs to be
+  // dragged HALF a grid cell before it jumps to the next line — mid-cell
+  // is exactly equidistant from both neighbors. This reimplements it as
+  // sticky/threshold snapping instead: the first snap of a given
+  // interaction still does a plain nearest-line snap (so a shape that
+  // ISN'T currently grid-aligned lands on the grid immediately, however
+  // little you've moved the mouse), but every snap after that stays on the
+  // current line until the cursor has moved a FULL grid spacing past it —
+  // i.e. every subsequent jump costs a full grid step of movement, not
+  // half of one.
+  function mpApplySnapDelta(event, axis, newValue) {
+    const current = event[axis];
+    const delta = newValue - current;
+    event.snapped = event.snapped || {};
+    event.snapped[axis] = true;
+    event[axis] += delta;
+    event['d' + axis] += delta;
+  }
+
+  gridSnapping.snapEvent = function(event, axis, opts) {
+    const spacing = smallGridSize;
+    let offset = 0;
+    if (opts && opts.offset) offset = opts.offset;
+
+    // For a plain whole-shape move, bpmn-js snaps the RAW CURSOR position
+    // (event[axis]) — not any fixed point on the shape. That means the
+    // point that actually lands on the grid depends on exactly where
+    // within the shape the user happened to grab it, which is why the
+    // same drag can look "on grid" or "off grid" depending on the click
+    // point. Resize/connect/multi-select interactions already snap a
+    // well-defined anchor (an edge via opts.min/max, or newBounds) and
+    // are left untouched. For the single-shape-move case we instead
+    // snap the shape's own PROJECTED EDGE (its original position plus
+    // the accumulated drag delta so far) so the result is anchored to
+    // the shape itself, independent of the grab point.
+    const ctx = event.context;
+    const shape = ctx && ctx.shape;
+    const deltaKey = 'd' + axis;
+    const singleShape = !!shape && !ctx.direction && !ctx.newBounds &&
+      (!ctx.shapes || ctx.shapes.length === 1);
+
+    let raw;
+    if (singleShape) {
+      raw = shape[axis] + (event[deltaKey] || 0) + offset;
+    } else {
+      raw = event[axis] + offset;
+    }
+
+    let snapped;
+    if (!(axis in mpSnapBaseline)) {
+      snapped = quantizeToGrid(raw, spacing);
+    } else {
+      const base = mpSnapBaseline[axis];
+      if (raw - base >= spacing) {
+        snapped = base + spacing * Math.floor((raw - base) / spacing);
+      } else if (base - raw >= spacing) {
+        snapped = base - spacing * Math.floor((base - raw) / spacing);
+      } else {
+        snapped = base;
+      }
+    }
+    if (opts && opts.min) {
+      const min = quantizeToGrid(opts.min + offset, spacing, 'ceil');
+      snapped = Math.max(snapped, min);
+    }
+    if (opts && opts.max) {
+      const max = quantizeToGrid(opts.max + offset, spacing, 'floor');
+      snapped = Math.min(snapped, max);
+    }
+    mpSnapBaseline[axis] = snapped;
+
+    if (singleShape) {
+      // We snapped the shape's projected edge, but snapEvent must still
+      // move the CURSOR-space value (event[axis]) by whatever delta gets
+      // the edge to land on `snapped` — apply that same delta to both
+      // event[axis] and event[dAxis] via mpApplySnapDelta.
+      const desiredEdge = snapped - offset;
+      const currentProjectedEdge = shape[axis] + (event[deltaKey] || 0);
+      mpApplySnapDelta(event, axis, event[axis] + (desiredEdge - currentProjectedEdge));
+    } else {
+      mpApplySnapDelta(event, axis, snapped - offset);
+    }
+  };
+
+  // Reset the sticky baseline at the start of every interaction that can
+  // drive snapEvent (see the fixed event list diagram-js registers its own
+  // grid-snapping listener against internally) — each new drag should
+  // start with a fresh plain nearest-line snap, not stay sticky to
+  // wherever a PREVIOUS, unrelated drag left off.
+  modeler.get('eventBus').on([
+    'shape.move.start', 'resize.start', 'create.start',
+    'connect.start', 'bendpoint.move.start', 'connectionSegment.move.start'
+  ], mpResetSnapBaseline);
 }
 
 // Rebuilds the grid layer from scratch — cheap enough (a handful of DOM
@@ -2774,6 +4535,10 @@ const DICTIONARIES_STORAGE_KEY = 'bpmnEditor.dictionaries';
 // bpmn-js's own built-in default size for a freshly created task — used as
 // the fallback/placeholder when no custom default has been configured.
 const BPMN_DEFAULT_TASK_SIZE = { width: 100, height: 80 };
+// Default size for a brand-new Choreography Task (see MpChoreographyRenderer)
+// — taller than a plain task by default so its fixed 40px header/footer
+// bands (MP_CHOR_BAND_HEIGHT) leave a reasonable amount of visible body.
+const MP_CHOREOGRAPHY_DEFAULT_SIZE = { width: 140, height: 160 };
 
 // The 5 places a dictionary's badges can appear (or nowhere at all).
 const DICT_POSITIONS = ['hide', 'left-top', 'right-top', 'left-bottom', 'right-bottom'];
@@ -3033,6 +4798,13 @@ function renderSettingsDialogHtml() {
   const taskDefaultSize = dictionaries.taskDefaultSize || BPMN_DEFAULT_TASK_SIZE;
   const isCustomTaskSize = !!dictionaries.taskDefaultSize;
 
+  // Same idea, separate setting — a Choreography Task's natural proportions
+  // (fixed-height header/footer bands, see MP_CHOR_BAND_HEIGHT) don't share
+  // anything useful with a plain task's, so it gets its own default rather
+  // than reusing taskDefaultSize above.
+  const choreographyTaskDefaultSize = dictionaries.choreographyTaskDefaultSize || MP_CHOREOGRAPHY_DEFAULT_SIZE;
+  const isCustomChoreographyTaskSize = !!dictionaries.choreographyTaskDefaultSize;
+
   const sectionLabel = 'font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.05em;margin:14px 0 6px;';
 
   // The dialog sizes to its content but is capped at 80% of the viewport
@@ -3064,7 +4836,23 @@ function renderSettingsDialogHtml() {
             onchange="updateTaskDefaultSize()"
             style="width:64px;font-size:13px;padding:5px 8px;border:1px solid #d0d0cc;border-radius:5px;">
           <span style="color:#999;font-size:11px;">px</span>
-          ${isCustomTaskSize ? `<button onclick="resetTaskDefaultSize()" style="font-size:11px;padding:4px 8px;margin-left:auto;">Reset to ${BPMN_DEFAULT_TASK_SIZE.width}×${BPMN_DEFAULT_TASK_SIZE.height}</button>` : ''}
+          <button id="dict-task-default-reset-btn" onclick="resetTaskDefaultSize()"
+            style="font-size:11px;padding:4px 8px;margin-left:auto;${isCustomTaskSize ? '' : 'display:none;'}">Reset to ${BPMN_DEFAULT_TASK_SIZE.width}×${BPMN_DEFAULT_TASK_SIZE.height}</button>
+        </div>
+
+        <div style="${sectionLabel}">Default Choreography Task size</div>
+        <div style="font-size:11px;color:#aaa;margin-bottom:8px;">Applies to newly created Choreography Tasks (exploratory, branch "choreography") — kept separate from the plain task size above since header/footer bands are a fixed 40px regardless of overall height.</div>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <input type="number" id="dict-chor-task-default-width" min="${MIN_SHAPE_SIZE}" step="1" value="${choreographyTaskDefaultSize.width}"
+            onchange="updateChoreographyTaskDefaultSize()"
+            style="width:64px;font-size:13px;padding:5px 8px;border:1px solid #d0d0cc;border-radius:5px;">
+          <span style="color:#999;">×</span>
+          <input type="number" id="dict-chor-task-default-height" min="${MIN_SHAPE_SIZE}" step="1" value="${choreographyTaskDefaultSize.height}"
+            onchange="updateChoreographyTaskDefaultSize()"
+            style="width:64px;font-size:13px;padding:5px 8px;border:1px solid #d0d0cc;border-radius:5px;">
+          <span style="color:#999;font-size:11px;">px</span>
+          <button id="dict-chor-task-default-reset-btn" onclick="resetChoreographyTaskDefaultSize()"
+            style="font-size:11px;padding:4px 8px;margin-left:auto;${isCustomChoreographyTaskSize ? '' : 'display:none;'}">Reset to ${MP_CHOREOGRAPHY_DEFAULT_SIZE.width}×${MP_CHOREOGRAPHY_DEFAULT_SIZE.height}</button>
         </div>
 
         <div style="${sectionLabel}">Canvas &amp; grid</div>
@@ -3212,15 +5000,71 @@ function updateTaskDefaultSize() {
   wInput.value = w;
   hInput.value = h;
 
+  // Width and height are two separate fields sharing this one onchange
+  // handler — tabbing from width to height fires width's onchange (and
+  // thus this function) while the height field may still hold its OLD
+  // value (the user hasn't typed into it, or blurred out of it, yet).
+  // refreshSettingsDialogList() replaces the dialog's entire innerHTML
+  // (see its own comment for why it's deferred a tick), which would
+  // recreate BOTH input elements from scratch — including the height field
+  // the user may be about to edit. If that swap landed while they were
+  // still mid-edit there, their in-progress value would be silently
+  // discarded and its own onchange would never fire again (the listener
+  // was on the now-detached old node). So this function deliberately never
+  // triggers that full rerender — the two inputs already show the right
+  // values (set two lines up), and the only other thing this section of
+  // the dialog can show (the Reset button) is toggled directly below,
+  // without touching the input elements at all.
+  const wasCustom = !!dictionaries.taskDefaultSize;
   dictionaries.taskDefaultSize = { width: w, height: h };
   onDictionariesChanged();
-  refreshSettingsDialogList();
+  const resetBtn = document.getElementById('dict-task-default-reset-btn');
+  if (resetBtn && !wasCustom) resetBtn.style.display = '';
 }
 
 function resetTaskDefaultSize() {
   dictionaries.taskDefaultSize = null;
   onDictionariesChanged();
-  refreshSettingsDialogList();
+  const wInput = document.getElementById('dict-task-default-width');
+  const hInput = document.getElementById('dict-task-default-height');
+  if (wInput) wInput.value = BPMN_DEFAULT_TASK_SIZE.width;
+  if (hInput) hInput.value = BPMN_DEFAULT_TASK_SIZE.height;
+  const resetBtn = document.getElementById('dict-task-default-reset-btn');
+  if (resetBtn) resetBtn.style.display = 'none';
+}
+
+function updateChoreographyTaskDefaultSize() {
+  const wInput = document.getElementById('dict-chor-task-default-width');
+  const hInput = document.getElementById('dict-chor-task-default-height');
+  if (!wInput || !hInput) return;
+
+  let w = Math.round(parseFloat(wInput.value));
+  let h = Math.round(parseFloat(hInput.value));
+  if (!isFinite(w) || w < MIN_SHAPE_SIZE) w = MIN_SHAPE_SIZE;
+  if (!isFinite(h) || h < MIN_SHAPE_SIZE) h = MIN_SHAPE_SIZE;
+  wInput.value = w;
+  hInput.value = h;
+
+  // See the matching comment in updateTaskDefaultSize() above — same
+  // shared-handler / deferred-full-rerender race applies here, so this
+  // never triggers a full dialog rerender either; only the Reset button's
+  // visibility is toggled, directly.
+  const wasCustom = !!dictionaries.choreographyTaskDefaultSize;
+  dictionaries.choreographyTaskDefaultSize = { width: w, height: h };
+  onDictionariesChanged();
+  const resetBtn = document.getElementById('dict-chor-task-default-reset-btn');
+  if (resetBtn && !wasCustom) resetBtn.style.display = '';
+}
+
+function resetChoreographyTaskDefaultSize() {
+  dictionaries.choreographyTaskDefaultSize = null;
+  onDictionariesChanged();
+  const wInput = document.getElementById('dict-chor-task-default-width');
+  const hInput = document.getElementById('dict-chor-task-default-height');
+  if (wInput) wInput.value = MP_CHOREOGRAPHY_DEFAULT_SIZE.width;
+  if (hInput) hInput.value = MP_CHOREOGRAPHY_DEFAULT_SIZE.height;
+  const resetBtn = document.getElementById('dict-chor-task-default-reset-btn');
+  if (resetBtn) resetBtn.style.display = 'none';
 }
 
 // Auto-save fields when the user leaves the element
@@ -4130,6 +5974,22 @@ canvasEl.addEventListener('drop', e => {
 let helpLang = 'en';
 try { helpLang = localStorage.getItem('bpmnEditor.helpLang') || 'en'; } catch(e) {}
 
+// Section shown inside the guide — HELP_CONTENT is now nested as
+// HELP_CONTENT[lang][section] (see help-content.js), with three sections:
+// "interface" (the app UI itself), "process" (Call Activities/Element
+// properties/Dictionaries — process-diagram-specific topics), and
+// "collaboration" (Pools/participants, Choreography Task, message
+// envelopes). Defaults to "interface" on every fresh open; persisted like
+// helpLang so re-opening the guide returns to the last section viewed.
+let helpSection = 'interface';
+try { helpSection = localStorage.getItem('bpmnEditor.helpSection') || 'interface'; } catch(e) {}
+
+const HELP_SECTION_LABELS = {
+  en: { interface: 'Interface', process: 'Process diagrams', collaboration: 'Collaborations' },
+  pl: { interface: 'Interfejs', process: 'Diagramy procesów', collaboration: 'Kolaboracje' },
+  ru: { interface: 'Интерфейс', process: 'Диаграммы процессов', collaboration: 'Коллаборации' }
+};
+
 function openHelp() {
   const old = document.getElementById('help-dialog');
   if (old) old.remove();
@@ -4149,19 +6009,34 @@ function renderHelpDialogHtml() {
     return `<button onclick="setHelpLang('${code}')" style="font-size:12px;padding:5px 14px;${active ? 'background:#1a6bb5;color:#fff;border-color:#1558a0;' : ''}">${label}</button>`;
   }).join('');
 
+  const sectionLabels = HELP_SECTION_LABELS[helpLang] || HELP_SECTION_LABELS.en;
+  const sections = ['interface', 'process', 'collaboration'];
+  const sectionTabs = sections.map(function(key) {
+    const active = helpSection === key;
+    return `<button onclick="setHelpSection('${key}')" style="font-size:13px;padding:6px 16px;border-radius:6px 6px 0 0;${active ? 'background:#fff;color:#1a6bb5;border:1px solid #e8e8e4;border-bottom:1px solid #fff;font-weight:600;' : 'background:#f4f4f2;color:#555;border:1px solid #e8e8e4;'}">${sectionLabels[key]}</button>`;
+  }).join('');
+
   return `<div style="background:#fff;border-radius:10px;width:720px;max-width:92vw;max-height:86vh;box-shadow:0 8px 32px rgba(0,0,0,0.18);display:flex;flex-direction:column;overflow:hidden;">
     <div style="display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid #e8e8e4;flex-shrink:0;">
       <div style="font-size:15px;font-weight:600;flex:1;">User guide</div>
       <div style="display:flex;gap:4px;">${tabs}</div>
       <button onclick="document.getElementById('help-dialog').remove()" style="font-size:13px;padding:5px 10px;">✕</button>
     </div>
-    <div class="help-content" style="overflow-y:auto;padding:8px 24px 24px;">${HELP_CONTENT[helpLang]}</div>
+    <div style="display:flex;gap:2px;padding:10px 24px 0;border-bottom:1px solid #e8e8e4;flex-shrink:0;">${sectionTabs}</div>
+    <div class="help-content" style="overflow-y:auto;padding:8px 24px 24px;">${HELP_CONTENT[helpLang][helpSection]}</div>
   </div>`;
 }
 
 function setHelpLang(lang) {
   helpLang = lang;
   try { localStorage.setItem('bpmnEditor.helpLang', lang); } catch(e) {}
+  const dialog = document.getElementById('help-dialog');
+  if (dialog) dialog.innerHTML = renderHelpDialogHtml();
+}
+
+function setHelpSection(section) {
+  helpSection = section;
+  try { localStorage.setItem('bpmnEditor.helpSection', section); } catch(e) {}
   const dialog = document.getElementById('help-dialog');
   if (dialog) dialog.innerHTML = renderHelpDialogHtml();
 }
