@@ -22,3 +22,8 @@ npm-debug.log*
 *.local.bpmn
 deploy_esnc.expect
 deploy_esnc.sftp
+
+# Internal project notes (server IP, hosting panel details) — not for the
+# public repo. Untracked from git history separately; see README/commit
+# instructions for the one-time `git rm --cached` needed the first time.
+KOMPENDIUM.md
