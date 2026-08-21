@@ -18,6 +18,14 @@ let navStack = [];
 // Name of the current file (without extension)
 let currentFilename = '';
 
+// Which subprocess nodes in the "Process structure" tree are collapsed
+// (their children hidden), keyed by businessObject id. Plain in-memory
+// state — not persisted to localStorage or the file — so it resets on
+// import/new file the same way the rest of the navigation state does; a
+// long-lived diagram someone keeps reopening could get this later if it
+// turns out to matter in practice.
+let collapsedTreeIds = new Set();
+
 /* ─── AUTO-ZAPIS ─── */
 // Handle (FileSystemFileHandle) to the file on disk, if the file was opened/saved
 // through the native picker (File System Access API). Without it we can't save
@@ -447,6 +455,24 @@ function updateTree() {
     const subprocesses = buildSubprocessTree(processBo, 1);
     const currentBo = currentRoot ? currentRoot.businessObject : null;
 
+    // If the active element sits inside a collapsed ancestor (e.g. the user
+    // drilled in via a canvas double-click rather than the tree itself),
+    // reveal that ancestor chain for this render so the active row is
+    // actually visible — without touching collapsedTreeIds itself, so the
+    // user's own collapse choices are still exactly as they left them once
+    // they navigate elsewhere.
+    const revealIds = new Set();
+    const activeIdx = currentBo ? subprocesses.findIndex(it => it.bo === currentBo) : -1;
+    if (activeIdx !== -1) {
+      let depth = subprocesses[activeIdx].depth;
+      for (let i = activeIdx - 1; i >= 0 && depth > 1; i--) {
+        if (subprocesses[i].depth === depth - 1) {
+          revealIds.add(subprocesses[i].bo.id);
+          depth = subprocesses[i].depth;
+        }
+      }
+    }
+
     let html = '';
 
     // Main process — show the filename. Active whether the canvas root is
@@ -459,11 +485,34 @@ function updateTree() {
       <span class="tree-label">${escHtml(processDisplayName)}</span>
     </div>`;
 
-    // Subprocesses and Call Activities
-    subprocesses.forEach(item => {
+    // Subprocesses and Call Activities — a subprocess with children can be
+    // collapsed to hide them, which matters once a process grows deep
+    // enough that this list stops fitting comfortably. buildSubprocessTree()
+    // does a depth-first walk, so a node's descendants are always the run of
+    // items immediately following it with a greater depth — skipDepth below
+    // tracks "hide everything deeper than this until depth drops back down",
+    // i.e. skip the entire collapsed subtree in one pass without needing a
+    // second (tree-shaped) data structure.
+    let skipDepth = null;
+    subprocesses.forEach((item, idx) => {
+      if (skipDepth !== null) {
+        if (item.depth > skipDepth) return;
+        skipDepth = null;
+      }
+
       const isActive = currentBo && currentBo === item.bo;
       const indent = item.depth * 16;
       const label = item.bo.name || item.bo.id || 'Subprocess';
+      const hasChildren = item.type === 'subprocess' &&
+        idx + 1 < subprocesses.length && subprocesses[idx + 1].depth > item.depth;
+      const isCollapsed = collapsedTreeIds.has(item.bo.id) && !revealIds.has(item.bo.id);
+      // ▲ = currently expanded (click collapses); ▼ = currently collapsed
+      // (click expands) — the reverse pairing from the Properties panel's
+      // own ▲/▼ toggle, chosen to match what was actually requested here.
+      const toggleHtml = hasChildren
+        ? `<button class="tree-toggle-btn" onclick="event.stopPropagation(); toggleTreeCollapse('${escHtml(item.bo.id)}')"
+            title="${isCollapsed ? 'Expand' : 'Collapse'}">${isCollapsed ? '▼' : '▲'}</button>`
+        : '';
 
       if (item.type === 'callactivity') {
         const targetId = item.targetRef;
@@ -489,14 +538,26 @@ function updateTree() {
           title="${escHtml(label)}">
           <span class="tree-icon sub" style="margin-left:0">⊕</span>
           <span class="tree-label">${escHtml(label)}</span>
+          ${toggleHtml}
         </div>`;
       }
+
+      if (hasChildren && isCollapsed) skipDepth = item.depth;
     });
 
     treeEl.innerHTML = html;
   } catch(e) {
     treeEl.innerHTML = `<div style="padding:12px;font-size:12px;color:#c00;">Error: ${e.message}</div>`;
   }
+}
+
+// Toggles whether a subprocess's children are hidden in the Process
+// structure tree. Purely a rendering concern — collapsing a node has no
+// effect on the diagram itself, only on how much of the tree list is drawn.
+function toggleTreeCollapse(id) {
+  if (collapsedTreeIds.has(id)) collapsedTreeIds.delete(id);
+  else collapsedTreeIds.add(id);
+  updateTree();
 }
 
 function treeNavigateTo(subprocessId) {
@@ -1163,6 +1224,7 @@ function initModeler() {
 
 async function newDiagram() {
   navStack = [];
+  collapsedTreeIds = new Set();
   currentFileHandle = null;
   hasUnsavedChanges = false;
   try {
@@ -1807,6 +1869,7 @@ function openFile(event) {
 
 async function importXml(xml, filename) {
   navStack = [];
+  collapsedTreeIds = new Set();
   try {
     // Add the camunda namespace if it's missing — needed for extensionElements
     if (!xml.includes('xmlns:camunda')) {
