@@ -212,6 +212,208 @@
       margin: 0 auto;
     }
 
+    /* ─── Choreography (branch "choreography") ───
+       See the long comment above MpChoreographyPalette in app.js. Hairline
+       dividers (reusing the same border color as the rest of this sidebar)
+       mark off the "Ogólne" / "Choreografia" / "Collaboration" sections that
+       reorganizePaletteForChoreography() assembles in the DOM.
+
+       The icon is a small line-art SVG applied as a CSS mask (not a plain
+       background-image), specifically so it renders in `currentColor`
+       instead of a baked-in color — same mechanism the rest of the app
+       would need if it ever masked an icon, kept here local to this one
+       rule since nothing else currently needs it. That makes it pick up
+       the exact same grey as the bpmn-icon-* glyphs and the same blue on
+       hover, and — because a mask is just a shape, not a fixed-size glyph
+       — it can be sized larger without turning blurry. */
+    .mp-palette-section-divider {
+      border: none;
+      border-top: 1px solid #e0e0dc;
+      margin: 6px 8px;
+    }
+    #palette-panel .djs-palette .entry.mp-chor-icon {
+      background-color: currentColor;
+      -webkit-mask-repeat: no-repeat;
+      mask-repeat: no-repeat;
+      -webkit-mask-position: center;
+      mask-position: center;
+      -webkit-mask-size: 30px 30px;
+      mask-size: 30px 30px;
+    }
+    /* Thin, single-weight outline (matches the built-in bpmn-icon-*
+       glyphs' line weight, e.g. the start event's circle) rather than the
+       earlier heavier/mixed-weight version — this is now the only
+       Choreography palette entry, so it reads as a real tool icon instead
+       of a mockup. The small envelope glyph that used to sit in the
+       middle band has been dropped too: a real Choreography Task doesn't
+       always have a message, and now that message envelopes are added
+       on-canvas via the shape's own + buttons, baking a fake one into the
+       palette icon was misleading rather than illustrative. */
+    .mp-chor-task {
+      -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='5' width='18' height='14' rx='2' fill='none' stroke='white' stroke-width='1.1'/%3E%3Cline x1='3' y1='9' x2='21' y2='9' stroke='white' stroke-width='1'/%3E%3Cline x1='3' y1='15' x2='21' y2='15' stroke='white' stroke-width='1'/%3E%3C/svg%3E");
+      mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='5' width='18' height='14' rx='2' fill='none' stroke='white' stroke-width='1.1'/%3E%3Cline x1='3' y1='9' x2='21' y2='9' stroke='white' stroke-width='1'/%3E%3Cline x1='3' y1='15' x2='21' y2='15' stroke='white' stroke-width='1'/%3E%3C/svg%3E");
+    }
+
+    /* On-canvas Choreography Task bands (see MpChoreographyRenderer /
+       MpChoreographyDirectEditing in app.js) — the foreignObject text
+       shown inside each band, and the floating textarea used to edit
+       whichever band was double-clicked. Kept local to these two rules
+       since nothing else on the canvas currently needs foreignObject text
+       or a free-floating overlay editor. */
+    .mp-chor-band-text {
+      width: 100%;
+      height: 100%;
+      box-sizing: border-box;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1px 4px;
+      /* Matches bpmn-js's own label style on every other element (Task,
+         Gateway, ...) exactly — that's an inline style on their SVG <text>
+         elements (font-family: Arial, sans-serif; font-size: 12px; fill:
+         rgb(34, 36, 42)), which this foreignObject/div doesn't inherit on
+         its own since it isn't a descendant of that <text> element. Without
+         this, the div falls back to the app's own UI font stack, which is
+         why band text used to look visibly different from every other
+         element's label. */
+      font-family: Arial, sans-serif;
+      font-size: 12px;
+      line-height: 1.25;
+      color: rgb(34, 36, 42);
+      overflow: hidden;
+      white-space: normal;
+      overflow-wrap: break-word;
+      text-align: center;
+      pointer-events: none;
+    }
+    .mp-chor-band-placeholder {
+      color: #aaa;
+      font-style: italic;
+    }
+    /* An envelope's own label (see MpEnvelopeRenderer / mpEnvelopeLabelRect
+       in app.js) — rendered beside or below its small icon, never on top of
+       it. text-align is set inline per instance (center under the icon,
+       left when placed to its side). */
+    .mp-envelope-label {
+      box-sizing: border-box;
+      width: 100%;
+      height: 100%;
+      /* flex column + justify-content (set inline per instance, see
+         mpVAlignToJustifyContent in app.js) is what lets the label hug the
+         edge of its box nearest the icon (or sit centered on it, for the
+         "side" position) regardless of how many lines the text wraps to —
+         without it, content always starts at the box's top, which is fine
+         for a FOOTER envelope's "below" label but leaves a large empty gap
+         above a HEADER envelope's "above" label instead of sitting flush
+         against the icon. */
+      display: flex;
+      flex-direction: column;
+      font-family: inherit;
+      font-size: 10px;
+      line-height: 1.25;
+      color: #333;
+      overflow: hidden;
+      white-space: normal;
+      overflow-wrap: break-word;
+      pointer-events: none;
+    }
+    /* Envelope's own inline label editor — same free-floating-overlay
+       approach as .mp-chor-inline-editor, sized/positioned to match
+       mpEnvelopeLabelRect() exactly so what you edit is what you see. */
+    .mp-envelope-label-editor {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 1px 3px;
+      border: 1px solid #1a6bb5;
+      outline: none;
+      background: #fff;
+      font-family: inherit;
+      font-size: 10px;
+      line-height: 1.25;
+      color: #222;
+      box-shadow: 0 0 0 2px rgba(26,107,181,0.15);
+      overflow-y: auto;
+      overflow-wrap: break-word;
+      white-space: pre-wrap;
+      cursor: text;
+    }
+    /* Context-pad "swap header/footer colors" icon (see
+       MpChoreographySwapContextPad in app.js) — same mask technique as the
+       palette icons above, just sized for the context pad's smaller 22×22
+       entries instead of the palette's 46×46 ones. */
+    .djs-context-pad .entry.mp-chor-icon.mp-chor-swap {
+      background-color: #404040;
+      -webkit-mask-repeat: no-repeat;
+      mask-repeat: no-repeat;
+      -webkit-mask-position: center;
+      mask-position: center;
+      -webkit-mask-size: 16px 16px;
+      mask-size: 16px 16px;
+      -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpolyline points='7,16 7,4' stroke='white' stroke-width='2' fill='none'/%3E%3Cpolyline points='3.5,7.5 7,3.5 10.5,7.5' stroke='white' stroke-width='2' fill='none'/%3E%3Cpolyline points='17,8 17,20' stroke='white' stroke-width='2' fill='none'/%3E%3Cpolyline points='13.5,16.5 17,20.5 20.5,16.5' stroke='white' stroke-width='2' fill='none'/%3E%3C/svg%3E");
+      mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpolyline points='7,16 7,4' stroke='white' stroke-width='2' fill='none'/%3E%3Cpolyline points='3.5,7.5 7,3.5 10.5,7.5' stroke='white' stroke-width='2' fill='none'/%3E%3Cpolyline points='17,8 17,20' stroke='white' stroke-width='2' fill='none'/%3E%3Cpolyline points='13.5,16.5 17,20.5 20.5,16.5' stroke='white' stroke-width='2' fill='none'/%3E%3C/svg%3E");
+    }
+
+    /* Context-pad "move envelope label beside/below" icon (see
+       MpEnvelopeLabelContextPad in app.js) — a small dashed box (the icon)
+       with a double-headed arrow pointing at where the label would move to. */
+    .djs-context-pad .entry.mp-chor-icon.mp-envelope-toggle-label {
+      background-color: #404040;
+      -webkit-mask-repeat: no-repeat;
+      mask-repeat: no-repeat;
+      -webkit-mask-position: center;
+      mask-position: center;
+      -webkit-mask-size: 16px 16px;
+      mask-size: 16px 16px;
+      -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='8' width='8' height='8' stroke='white' stroke-width='2' fill='none'/%3E%3Cpolyline points='14,12 21,12' stroke='white' stroke-width='2' fill='none'/%3E%3Cpolyline points='18,9 21,12 18,15' stroke='white' stroke-width='2' fill='none'/%3E%3C/svg%3E");
+      mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='8' width='8' height='8' stroke='white' stroke-width='2' fill='none'/%3E%3Cpolyline points='14,12 21,12' stroke='white' stroke-width='2' fill='none'/%3E%3Cpolyline points='18,9 21,12 18,15' stroke='white' stroke-width='2' fill='none'/%3E%3C/svg%3E");
+    }
+
+    .mp-chor-inline-editor {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 1px 4px;
+      border: 1px solid #1a6bb5;
+      outline: none;
+      background: #fff;
+      /* Same font as .mp-chor-band-text (see above) so what you type while
+         editing matches what's shown once you commit. */
+      font-family: Arial, sans-serif;
+      font-size: 12px;
+      line-height: 1.2;
+      color: rgb(34, 36, 42);
+      text-align: center;
+      box-shadow: 0 0 0 2px rgba(26,107,181,0.15);
+      overflow-y: auto;
+      overflow-wrap: break-word;
+      white-space: pre-wrap;
+      cursor: text;
+    }
+
+    /* "+" overlay buttons shown above/below a selected Choreography Task
+       (see refreshEnvelopeButtons() in app.js) — small enough to sit right
+       against the shape's edge without covering its header/footer text. */
+    .mp-chor-envelope-add-btn {
+      width: 22px;
+      height: 22px;
+      box-sizing: border-box;
+      border: 1.5px solid #555;
+      border-radius: 50%;
+      background: #fff;
+      color: #333;
+      font-size: 15px;
+      line-height: 19px;
+      text-align: center;
+      font-family: inherit;
+      cursor: pointer;
+      user-select: none;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+    }
+    .mp-chor-envelope-add-btn:hover {
+      background: #f0f0ec;
+      border-color: #1a6bb5;
+      color: #1a6bb5;
+    }
+
     /* Dims the rest of the app while the first-time coachmark is showing,
        so the callout and the highlighted "?" button (see below) stand
        out clearly. Sits above everything except the coachmark itself and
